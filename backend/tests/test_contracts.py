@@ -203,3 +203,48 @@ async def test_investigations_endpoints_flow(client: AsyncClient):
     nf_resp = await client.get(f"/api/v1/investigations/{random_case_id}")
     assert nf_resp.status_code == 404
     assert nf_resp.json()["error"]["code"] == "ENTITY_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_payments_by_reference_endpoint(client: AsyncClient, db_session):
+    """Verify retrieval of payment details by human-readable reference code."""
+    from backend.app.services.payment import PaymentService
+
+    service = PaymentService(db_session)
+    await service.create_payment(
+        payment_reference="tx_by_ref_spec_100",
+        customer_id="cust_ref_100",
+        merchant_id="merch_ref_100",
+        amount=Decimal("49.99"),
+        currency="USD",
+        payment_method="ach",
+        status="pending",
+        gateway_name="adyen",
+    )
+
+    resp = await client.get("/api/v1/payments/by-reference/tx_by_ref_spec_100")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["payment_reference"] == "tx_by_ref_spec_100"
+    assert data["status"] == "pending"
+
+    # Non-existent reference returns 404
+    nf_resp = await client.get("/api/v1/payments/by-reference/tx_nonexistent_reference_xyz")
+    assert nf_resp.status_code == 404
+    assert nf_resp.json()["error"]["code"] == "ENTITY_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_investigations_metrics_endpoint(client: AsyncClient):
+    """Verify backend metrics endpoint returns aggregate counts for the dashboard."""
+    resp = await client.get("/api/v1/investigations/metrics")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "total_cases" in data
+    assert "open_cases" in data
+    assert "triaged_cases" in data
+    assert "escalated_cases" in data
+    assert "by_category" in data
+    assert isinstance(data["total_cases"], int)
+    assert isinstance(data["by_category"], dict)
+
