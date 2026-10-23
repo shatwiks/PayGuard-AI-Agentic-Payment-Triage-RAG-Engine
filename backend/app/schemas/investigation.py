@@ -105,3 +105,15 @@ class InvestigationFilterParams(BaseModel):
     priority: Optional[str] = Field(default=None, description="Case priority: low, medium, high, urgent")
     issue_category: Optional[str] = Field(default=None, description="Classified issue category")
     human_review_required: Optional[bool] = Field(default=None, description="Filter for cases requiring human approval")
+
+
+class InvestigationMetricsResponse(BaseModel):
+    """Real aggregate metrics for operations dashboard."""
+    total_cases: int = Field(default=0, description="Total investigation cases in user scope")
+    open_cases: int = Field(default=0, description="Cases in 'open' status")
+    in_progress_cases: int = Field(default=0, description="Cases in 'in_progress' status")
+    triaged_cases: int = Field(default=0, description="Cases in 'triaged' status")
+    escalated_cases: int = Field(default=0, description="Cases in 'escalated' status")
+    closed_cases: int = Field(default=0, description="Cases in 'closed' status")
+    by_category: Dict[str, int] = Field(default_factory=dict, description="Counts grouped by issue category")
+

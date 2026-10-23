@@ -49,6 +49,24 @@ async def list_payments(
 
 
 @router.get(
+    "/by-reference/{reference}",
+    response_model=PaymentDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Payment Details by Reference",
+    description="Retrieve detailed transaction information including gateway metadata and chronological event timeline by payment reference code.",
+)
+async def get_payment_by_reference(
+    reference: str,
+    db: AsyncSession = Depends(get_db),
+) -> PaymentDetailResponse:
+    service = PaymentService(db)
+    payment = await service.get_payment_by_reference(reference)
+    if not payment:
+        raise EntityNotFoundException("Payment", reference)
+    return payment
+
+
+@router.get(
     "/{payment_id}",
     response_model=PaymentDetailResponse,
     status_code=status.HTTP_200_OK,

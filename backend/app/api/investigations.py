@@ -11,11 +11,12 @@ from sqlalchemy.orm import selectinload
 from backend.app.core.database import get_db
 from backend.app.core.errors import EntityNotFoundException, ForbiddenException, UnauthorizedException
 from backend.app.core.rate_limit import rate_limit
-from backend.app.models.investigation import InvestigationCase
+from backend.app.models.investigation import InvestigationCase, InvestigationResult
 from backend.app.schemas.common import PaginatedResponse
 from backend.app.schemas.investigation import (
     InvestigationCaseResponse,
     InvestigationCreateRequest,
+    InvestigationMetricsResponse,
 )
 from backend.app.services.audit import AuditService
 from backend.app.services.llm import LLMReasoningService
@@ -63,6 +64,57 @@ async def create_investigation(
 
     user_resp = UserResponse.model_validate(current_user) if current_user else None
     return await orchestrator.run_investigation(request=request, current_user=user_resp)
+
+
+@router.get(
+    "/metrics",
+    response_model=InvestigationMetricsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Real Investigation Metrics",
+    description="Calculate real backend metrics grouped by case status and issue category scoped to user role.",
+)
+async def get_investigation_metrics(
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+) -> InvestigationMetricsResponse:
+    conditions = []
+    if current_user and current_user.role == "support_agent":
+        conditions.append(
+            (InvestigationCase.created_by_user_id == current_user.id)
+            | (InvestigationCase.created_by_user_id == None)  # noqa: E711
+        )
+    elif not current_user:
+        conditions.append(InvestigationCase.created_by_user_id == None)  # noqa: E711
+
+    # Status counts
+    status_stmt = select(InvestigationCase.status, func.count(InvestigationCase.id)).group_by(InvestigationCase.status)
+    if conditions:
+        status_stmt = status_stmt.where(*conditions)
+    status_res = await db.execute(status_stmt)
+    status_counts = dict(status_res.all())
+
+    total = sum(status_counts.values())
+
+    # Category counts
+    cat_stmt = (
+        select(InvestigationResult.issue_category, func.count(InvestigationResult.id))
+        .join(InvestigationCase, InvestigationCase.id == InvestigationResult.case_id)
+        .group_by(InvestigationResult.issue_category)
+    )
+    if conditions:
+        cat_stmt = cat_stmt.where(*conditions)
+    cat_res = await db.execute(cat_stmt)
+    category_counts = dict(cat_res.all())
+
+    return InvestigationMetricsResponse(
+        total_cases=total,
+        open_cases=status_counts.get("open", 0),
+        in_progress_cases=status_counts.get("in_progress", 0),
+        triaged_cases=status_counts.get("triaged", 0),
+        escalated_cases=status_counts.get("escalated", 0),
+        closed_cases=status_counts.get("closed", 0),
+        by_category=category_counts,
+    )
 
 
 @router.get(

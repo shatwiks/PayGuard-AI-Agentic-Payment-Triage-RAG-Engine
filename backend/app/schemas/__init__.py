@@ -25,6 +25,7 @@ from backend.app.schemas.investigation import (
     InvestigationResultResponse,
     InvestigationCaseResponse,
     InvestigationFilterParams,
+    InvestigationMetricsResponse,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "InvestigationResultResponse",
     "InvestigationCaseResponse",
     "InvestigationFilterParams",
+    "InvestigationMetricsResponse",
 ]
