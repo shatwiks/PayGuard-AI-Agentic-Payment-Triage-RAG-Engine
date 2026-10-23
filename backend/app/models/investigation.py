@@ -177,11 +177,26 @@ class InvestigationResult(Base):
         default="gpt-4o-mini",
         nullable=False
     )
+    retrieval_mode: Mapped[str] = mapped_column(
+        String(32),
+        default="hybrid",
+        nullable=False
+    )
+    generation_mode: Mapped[str] = mapped_column(
+        String(32),
+        default="deterministic_fallback",
+        nullable=False
+    )
+    evidence_package: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONType,
+        nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=datetime.utcnow,
         nullable=False
     )
+
 
     # Relationship
     case: Mapped["InvestigationCase"] = relationship(
