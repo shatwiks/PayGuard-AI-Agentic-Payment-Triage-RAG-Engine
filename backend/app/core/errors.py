@@ -1,6 +1,6 @@
 """PayGuard AI error hierarchy and standardized HTTP exception handlers."""
 
-from typing import Optional
+from typing import Any, Optional
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -72,7 +72,8 @@ def register_error_handlers(app: FastAPI) -> None:
                 field=field,
             )
         )
+        status_code = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status_code,
             content=response_model.model_dump(mode="json"),
         )

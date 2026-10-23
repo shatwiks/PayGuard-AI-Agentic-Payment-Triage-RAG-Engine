@@ -22,8 +22,8 @@ JSONType = JSONB().with_variant(JSON(), "sqlite")
 
 try:
     from pgvector.sqlalchemy import Vector
-    # Vector column with 1536 dimensions (compatible with text-embedding-3-small and standard embeddings)
-    VectorColumn = Vector(1536).with_variant(JSONType, "sqlite")
+    # Vector column with 1536 dimensions (compatible with pgvector and SQLite JSON variant)
+    VectorColumn = Vector(1536).with_variant(JSON(), "sqlite")
 except ImportError:
     VectorColumn = JSONType
 

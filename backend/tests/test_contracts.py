@@ -18,23 +18,23 @@ def test_openapi_schema_endpoint_contracts():
 
     # Verify required endpoints exist
     assert "/api/v1/health" in paths
-    assert "get" in paths["api/v1/health"]
+    assert "get" in paths["/api/v1/health"]
 
     assert "/api/v1/auth/login" in paths
-    assert "post" in paths["api/v1/auth/login"]
+    assert "post" in paths["/api/v1/auth/login"]
 
     assert "/api/v1/payments" in paths
-    assert "get" in paths["api/v1/payments"]
+    assert "get" in paths["/api/v1/payments"]
 
     assert "/api/v1/payments/{payment_id}" in paths
-    assert "get" in paths["api/v1/payments/{payment_id}"]
+    assert "get" in paths["/api/v1/payments/{payment_id}"]
 
     assert "/api/v1/investigations" in paths
-    assert "post" in paths["api/v1/investigations"]
-    assert "get" in paths["api/v1/investigations"]
+    assert "post" in paths["/api/v1/investigations"]
+    assert "get" in paths["/api/v1/investigations"]
 
     assert "/api/v1/investigations/{investigation_id}" in paths
-    assert "get" in paths["api/v1/investigations/{investigation_id}"]
+    assert "get" in paths["/api/v1/investigations/{investigation_id}"]
 
 
 def test_triage_engine_rules():
