@@ -1,0 +1,99 @@
+"""Security utilities: password hashing, JWT tokens, and deterministic PII masking."""
+
+from datetime import datetime, timedelta, timezone
+import re
+from typing import Any, Dict, Optional, Union
+import jwt
+from passlib.context import CryptContext
+
+from backend.app.core.config import settings
+
+# Password hashing context (bcrypt)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Precompiled PII regular expressions
+# Credit card regex: matches 13 to 19 digit sequences with optional hyphens/spaces
+CARD_REGEX = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+# Email regex
+EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
+# Phone regex: matches common international and domestic phone formats
+PHONE_REGEX = re.compile(r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
+# Bank account / IBAN style regex (e.g. Acc: 1234567890)
+ACCOUNT_REGEX = re.compile(r"(?i)\b(?:acc(?:ount)?[\s#:]+)(\d{8,17})\b")
+# SSN / Tax ID regex (###-##-####)
+SSN_REGEX = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifies a plain password against its bcrypt hash."""
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password: str) -> str:
+    """Generates bcrypt hash of password."""
+    return pwd_context.hash(password)
+
+
+def create_access_token(
+    subject: Union[str, Any],
+    role: str = "support_agent",
+    expires_delta: Optional[timedelta] = None,
+) -> str:
+    """Generates signed HMAC-SHA256 JWT access token."""
+    now = datetime.now(timezone.utc)
+    if expires_delta:
+        expire = now + expires_delta
+    else:
+        expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    payload = {
+        "exp": expire,
+        "iat": now,
+        "sub": str(subject),
+        "role": role,
+    }
+    encoded_jwt = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
+
+
+def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
+    """Decodes and validates JWT access token."""
+    try:
+        decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        return decoded
+    except (jwt.PyJWTError, ValueError):
+        return None
+
+
+def mask_pii(text: str) -> str:
+    """Deterministic PII masking.
+    Masks card numbers, emails, phone numbers, bank accounts, and SSNs.
+    """
+    if not settings.MASK_PII_ENABLED or not text:
+        return text
+
+    sanitized = text
+
+    # Mask card numbers (preserve last 4 if 16 digits)
+    def mask_card(match: re.Match) -> str:
+        digits = re.sub(r"\D", "", match.group(0))
+        if len(digits) >= 13 and len(digits) <= 19:
+            last4 = digits[-4:]
+            return f"[CARD_REDACTED_*{last4}]"
+        return match.group(0)
+
+    sanitized = CARD_REGEX.sub(mask_card, sanitized)
+
+    # Mask Bank Account numbers
+    sanitized = ACCOUNT_REGEX.sub(r"account [ACCOUNT_ID_REDACTED]", sanitized)
+
+    # Mask SSNs
+    sanitized = SSN_REGEX.sub("[TAX_ID_REDACTED]", sanitized)
+
+    # Mask emails
+    sanitized = EMAIL_REGEX.sub("[EMAIL_REDACTED]", sanitized)
+
+    # Mask phone numbers
+    sanitized = PHONE_REGEX.sub("[PHONE_REDACTED]", sanitized)
+
+    return sanitized
