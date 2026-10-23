@@ -36,6 +36,11 @@ class PolicyCitation(BaseModel):
     section_header: str = Field(description="Section or rule clause identifier (e.g., Condition 10.4, Return Code R01)")
     excerpt: str = Field(description="Extracted verbatim policy excerpt supporting the recommendation")
     confidence_score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="RAG retrieval similarity score")
+    source_id: Optional[str] = Field(default=None, description="Stable source identifier or URI")
+    source_url: Optional[str] = Field(default=None, description="Canonical source URL")
+    document_id: Optional[uuid.UUID] = Field(default=None, description="UUID of source knowledge document")
+    chunk_id: Optional[uuid.UUID] = Field(default=None, description="UUID of cited chunk")
+    is_synthetic_demonstration: bool = Field(default=True, description="Flag indicating synthetic demonstration status")
 
 
 class InvestigationResultResponse(BaseModel):
