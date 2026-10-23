@@ -58,7 +58,9 @@ def create_application() -> FastAPI:
     register_error_handlers(app)
 
 
-    # Mount master API v1 router
+    # Mount master API v1 router and root health probe
+    from backend.app.api.health import router as health_router
+    app.include_router(health_router)
     app.include_router(api_router, prefix=settings.API_V1_STR)
 
     return app
