@@ -106,9 +106,10 @@ def mask_pii(text: str) -> str:
 
 
 PROMPT_INJECTION_PATTERNS = [
-    re.compile(r"(?i)\b(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:previous|prior|above|system)\s+(?:instructions|rules|prompts?)\b"),
+    re.compile(r"(?i)\b(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:previous|prior|above|system|your)?\s*(?:instructions|rules|prompts?|directions)\b"),
     re.compile(r"(?i)\b(?:you\s+are\s+now|act\s+as)\s+(?:an?\s+)?(?:administrator|unrestricted|god\s+mode|root|jailbreak)\b"),
     re.compile(r"(?i)\b(?:system\s*(?:prompt|override|message)\s*:)"),
+    re.compile(r"(?i)\b(?:output|reveal|show|print)\s+(?:the\s+)?system\s+prompt\b"),
     re.compile(r"(?i)\b(?:execute\s+sql|drop\s+table|grant\s+admin|bypass\s+auth)\b"),
     re.compile(r"(?i)<\s*(?:script|iframe|object|embed)[^>]*>"),
 ]
