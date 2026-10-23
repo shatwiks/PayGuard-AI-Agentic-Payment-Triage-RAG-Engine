@@ -105,6 +105,35 @@ def mask_pii(text: str) -> str:
     return sanitized
 
 
+PROMPT_INJECTION_PATTERNS = [
+    re.compile(r"(?i)\b(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:previous|prior|above|system)\s+(?:instructions|rules|prompts?)\b"),
+    re.compile(r"(?i)\b(?:you\s+are\s+now|act\s+as)\s+(?:an?\s+)?(?:administrator|unrestricted|god\s+mode|root|jailbreak)\b"),
+    re.compile(r"(?i)\b(?:system\s*(?:prompt|override|message)\s*:)"),
+    re.compile(r"(?i)\b(?:execute\s+sql|drop\s+table|grant\s+admin|bypass\s+auth)\b"),
+    re.compile(r"(?i)<\s*(?:script|iframe|object|embed)[^>]*>"),
+]
+
+
+def sanitize_prompt_input(text: str) -> tuple[str, bool]:
+    """Detects and neutralizes prompt injection patterns in untrusted input.
+    Returns (sanitized_text, injection_detected: bool).
+    """
+    if not text or not settings.PROMPT_INJECTION_DEFENSE_ENABLED:
+        return text, False
+
+    injection_detected = False
+    sanitized = text
+
+    for pattern in PROMPT_INJECTION_PATTERNS:
+        if pattern.search(sanitized):
+            injection_detected = True
+            sanitized = pattern.sub("[POTENTIAL_PROMPT_INJECTION_NEUTRALIZED]", sanitized)
+
+    return sanitized, injection_detected
+
+
+
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select

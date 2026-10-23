@@ -47,7 +47,17 @@ class Settings(BaseSettings):
     RETRIEVAL_LEXICAL_WEIGHT: float = 1.0
     RETRIEVAL_SEMANTIC_WEIGHT: float = 1.0
 
+    # Security & Reliability (Phase 6)
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = 15
+    RATE_LIMIT_INVESTIGATIONS_PER_MINUTE: int = 40
+    RATE_LIMIT_SEARCH_PER_MINUTE: int = 60
+    REQUEST_MAX_BODY_BYTES: int = 1_048_576  # 1 MB
+    PROMPT_INJECTION_DEFENSE_ENABLED: bool = True
+    INVESTIGATION_IDEMPOTENCY_WINDOW_SECONDS: int = 15
+
     # CORS
+
     BACKEND_CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
