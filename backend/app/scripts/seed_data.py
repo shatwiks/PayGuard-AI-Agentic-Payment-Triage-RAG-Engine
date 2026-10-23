@@ -382,6 +382,31 @@ SAMPLE_DOCUMENTS = [
             },
         ],
     },
+    {
+        "title": "Payment Operations: SOP for Gateway Timeouts and Reconciliation Gaps",
+        "source_id": "internal://policies/payment-operations-standard-operating-procedures",
+        "doc_type": "troubleshooting_guide",
+        "version": "1.2",
+        "source_url": "https://internal.payguard.ai/docs/ops-sop-timeouts-v1.2.md",
+        "chunks": [
+            {
+                "section": "Gateway Timeouts & Upstream Disconnects",
+                "content": (
+                    "When an upstream processor connection times out after 30000ms (30 seconds), the gateway transition remains pending or failed. "
+                    "Support operations engineers must immediately invoke the PSP transaction verification API to check whether authorization captured. "
+                    "If the PSP confirms capture, update internal database status to captured to prevent duplicate retries."
+                ),
+            },
+            {
+                "section": "Webhook Delivery Gaps & Manual Ledger Reconciliation",
+                "content": (
+                    "Missing webhook notifications create discrepancies between gateway processor status and internal payment state. "
+                    "When a customer card is debited but payment state remains pending or failed, the support engineer must pull the processor event log. "
+                    "Perform manual ledger reconciliation by matching the payment reference and acquirer reference number before issuing compensation."
+                ),
+            },
+        ],
+    },
 ]
 
 

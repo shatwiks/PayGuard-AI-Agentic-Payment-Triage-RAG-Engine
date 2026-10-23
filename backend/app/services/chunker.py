@@ -17,9 +17,9 @@ class TextChunk(BaseModel):
 class DocumentChunker:
     """Deterministic section-aware chunker for payment policy and troubleshooting guides."""
 
-    # Heading patterns: markdown '# Header', '## Header', or 'Section X.X: Header', 'Rule XYZ:'
+    # Heading patterns: markdown '# Header', '## Header', or structured 'Section X.X: Header', 'Rule 10.4 - Header'
     HEADER_REGEX = re.compile(
-        r"^(?:#{1,6}\s+(.+)|((?:Section|Rule|Return Code|Article)\s+[^:\n]+:?\s*.+))$",
+        r"^(?:#{1,6}\s+(.+)|((?:Section|Rule|Article)\s+[0-9A-Za-z_.-]+(?::|\s+-)[^\n]{0,120}))$",
         re.MULTILINE,
     )
 
