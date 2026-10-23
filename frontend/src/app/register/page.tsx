@@ -1,0 +1,220 @@
+"use client";
+
+import React, { useState } from "react";
+import Link from "next/link";
+import { useAuth } from "@/context/AuthContext";
+import { ApiError } from "@/lib/api";
+import { ShieldAlert, Eye, EyeOff, Loader2 } from "lucide-react";
+import { ErrorAlert } from "@/components/ui/ErrorAlert";
+
+export default function RegisterPage() {
+  const { register } = useAuth();
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState("support_agent");
+  const [showPassword, setShowPassword] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<{ message: string; code?: string; retryAfter?: number | null } | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!fullName.trim()) {
+      setError({ message: "Please enter your full name." });
+      return;
+    }
+    if (!email.trim()) {
+      setError({ message: "Please enter your email address." });
+      return;
+    }
+    if (password.length < 8) {
+      setError({ message: "Password must be at least 8 characters long." });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await register({
+        full_name: fullName.trim(),
+        email: email.trim(),
+        password,
+        role,
+      });
+    } catch (err: any) {
+      if (err instanceof ApiError) {
+        setError({
+          message: err.message,
+          code: err.code,
+          retryAfter: err.retryAfter,
+        });
+      } else {
+        setError({
+          message: "Unable to create account. Please try again.",
+        });
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col justify-center py-12 sm:px-6 lg:px-8 bg-slate-50">
+      <div className="sm:mx-auto sm:w-full sm:max-w-md text-center">
+        <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-blue-600 text-white shadow-md mb-4">
+          <ShieldAlert className="w-7 h-7" />
+        </div>
+        <h2 className="text-2xl font-bold tracking-tight text-slate-900">
+          Register Support Personnel
+        </h2>
+        <p className="mt-2 text-sm text-slate-600">
+          Create an account to access payment triage and RAG investigation tools.
+        </p>
+      </div>
+
+      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+        <div className="bg-white py-8 px-6 shadow-sm border border-slate-200 sm:rounded-xl sm:px-10">
+          {error && (
+            <ErrorAlert
+              message={error.message}
+              code={error.code}
+              retryAfter={error.retryAfter}
+              className="mb-6"
+            />
+          )}
+
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            <div>
+              <label
+                htmlFor="fullName"
+                className="block text-sm font-medium text-slate-700"
+              >
+                Full Name
+              </label>
+              <div className="mt-1">
+                <input
+                  id="fullName"
+                  name="fullName"
+                  type="text"
+                  required
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="Alex Rivera"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg shadow-2xs placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="email"
+                className="block text-sm font-medium text-slate-700"
+              >
+                Work Email
+              </label>
+              <div className="mt-1">
+                <input
+                  id="email"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="alex.rivera@payguard.internal"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg shadow-2xs placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="role"
+                className="block text-sm font-medium text-slate-700"
+              >
+                Operational Role
+              </label>
+              <div className="mt-1">
+                <select
+                  id="role"
+                  name="role"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg shadow-2xs focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm bg-white"
+                >
+                  <option value="support_agent">Support Agent (Triage & Investigate)</option>
+                  <option value="compliance_analyst">Compliance Analyst (All Cases & Ingestion)</option>
+                  <option value="admin">Administrator (Full Access)</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label
+                htmlFor="password"
+                className="block text-sm font-medium text-slate-700"
+              >
+                Password (min. 8 characters)
+              </label>
+              <div className="mt-1 relative">
+                <input
+                  id="password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="new-password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••••••"
+                  className="w-full px-3 py-2 pr-10 border border-slate-300 rounded-lg shadow-2xs placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"
+                  tabIndex={-1}
+                >
+                  {showPassword ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 transition"
+              >
+                {isSubmitting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Creating Account...
+                  </>
+                ) : (
+                  "Register Account"
+                )}
+              </button>
+            </div>
+          </form>
+
+          <div className="mt-6 border-t border-slate-200 pt-4 text-center">
+            <p className="text-xs text-slate-500">
+              Already have an account?{" "}
+              <Link
+                href="/login"
+                className="font-medium text-blue-600 hover:text-blue-500"
+              >
+                Sign in
+              </Link>
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
