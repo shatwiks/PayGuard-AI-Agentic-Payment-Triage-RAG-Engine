@@ -34,6 +34,11 @@ class TriageClassificationResult:
     identified_failure_code: Optional[str] = None
     is_ambiguous: bool = False
     missing_fields: List[str] = field(default_factory=list)
+    recommended_action: str = "ESCALATE_TO_ANALYST"
+    recommended_action_details: str = "Review transaction records manually."
+    conflicting_evidence: List[str] = field(default_factory=list)
+    supporting_record_ids: List[str] = field(default_factory=list)
+
 
 
 @dataclass(frozen=True)
