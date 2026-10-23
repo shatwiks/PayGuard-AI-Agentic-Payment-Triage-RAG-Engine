@@ -1,11 +1,15 @@
 """PayGuard AI error hierarchy and standardized HTTP exception handlers."""
 
+import logging
 from typing import Any, Optional
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.schemas.common import ErrorDetail, ErrorResponse
+
+logger = logging.getLogger("payguard.errors")
 
 
 class PayGuardException(Exception):
@@ -68,7 +72,7 @@ class DatabaseException(PayGuardException):
 
 
 def register_error_handlers(app: FastAPI) -> None:
-    """Registers standard RFC 7807 error envelopes for all custom and validation exceptions."""
+    """Registers standard RFC 7807 error envelopes for all custom, HTTP, and validation exceptions."""
 
     @app.exception_handler(PayGuardException)
     async def payguard_exception_handler(request: Request, exc: PayGuardException):
@@ -95,5 +99,42 @@ def register_error_handlers(app: FastAPI) -> None:
         status_code = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
         return JSONResponse(
             status_code=status_code,
+            content=response_model.model_dump(mode="json"),
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        code_map = {
+            401: "UNAUTHORIZED",
+            403: "FORBIDDEN",
+            404: "NOT_FOUND",
+            409: "RESOURCE_CONFLICT",
+            413: "PAYLOAD_TOO_LARGE",
+            422: "VALIDATION_ERROR",
+            429: "RATE_LIMIT_EXCEEDED",
+        }
+        code = code_map.get(exc.status_code, "HTTP_ERROR")
+        message = exc.detail if isinstance(exc.detail, str) else "An HTTP error occurred"
+        response_model = ErrorResponse(
+            error=ErrorDetail(code=code, message=message)
+        )
+        headers = dict(exc.headers) if exc.headers else None
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=response_model.model_dump(mode="json"),
+            headers=headers,
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        logger.error("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+        response_model = ErrorResponse(
+            error=ErrorDetail(
+                code="INTERNAL_SERVER_ERROR",
+                message="An unexpected internal server error occurred.",
+            )
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content=response_model.model_dump(mode="json"),
         )
