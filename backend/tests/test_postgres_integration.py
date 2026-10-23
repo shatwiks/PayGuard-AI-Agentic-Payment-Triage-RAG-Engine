@@ -160,3 +160,105 @@ async def test_postgres_payment_and_audit_persistence(pg_session: AsyncSession):
     await pg_session.delete(payment)
     await pg_session.delete(audit)
     await pg_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_postgres_fts_generated_tsvector_and_gin_index(pg_session: AsyncSession):
+    """Verify PostgreSQL automatically maintains the generated tsvector column and GIN index."""
+    # 1. Verify GIN index exists in PostgreSQL catalog
+    index_check = await pg_session.execute(text("""
+        SELECT indexname FROM pg_indexes
+        WHERE tablename = 'document_chunks' AND indexname = 'idx_document_chunks_tsv';
+    """))
+    assert index_check.scalar_one_or_none() == "idx_document_chunks_tsv"
+
+    # 2. Insert a document and chunk without providing tsv (verifies GENERATED ALWAYS AS column)
+    doc_id = uuid.uuid4()
+    doc = KnowledgeDocument(
+        id=doc_id,
+        title="Live FTS Test Policy",
+        doc_type="scheme_rules",
+        version="1.0",
+        source_id="internal://test/live-fts",
+        raw_content="Content for live test",
+        is_active=True,
+    )
+    pg_session.add(doc)
+    await pg_session.flush()
+
+    chunk_id = uuid.uuid4()
+    chunk = DocumentChunk(
+        id=chunk_id,
+        document_id=doc_id,
+        chunk_index=0,
+        section_header="ACH Return Code R01 Specification",
+        content="Return Code R01 indicates insufficient funds in customer bank account for debit entry.",
+        token_count=18,
+        embedding_model="mock-fts-model",
+        embedding=[0.0] * 1536,
+        metadata_={"test": True},
+    )
+    pg_session.add(chunk)
+    await pg_session.commit()
+
+    # 3. Query using PostgreSQL full-text search operator @@ and ts_rank_cd
+    sql_fts = text("""
+        SELECT id, section_header, ts_rank_cd(tsv, plainto_tsquery('english', 'R01 insufficient funds')) AS score
+        FROM document_chunks
+        WHERE id = :chunk_id AND tsv @@ plainto_tsquery('english', 'R01 insufficient funds');
+    """)
+    res = await pg_session.execute(sql_fts, {"chunk_id": chunk_id})
+    row = res.fetchone()
+    assert row is not None, "PostgreSQL FTS must match text in generated tsvector column"
+    assert row[0] == chunk_id
+    assert float(row[2]) > 0.0
+
+    # Clean up
+    await pg_session.delete(chunk)
+    await pg_session.delete(doc)
+    await pg_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_postgres_hybrid_retrieval_service_live(pg_session: AsyncSession):
+    """Verify HybridRetrievalService executes real PostgreSQL FTS and pgvector similarity queries."""
+    from backend.app.services.embedding import MockEmbeddingProvider
+    from backend.app.services.retrieval import HybridRetrievalService
+    from backend.app.services.ingestion import DocumentIngestionPipeline
+
+    target_model = "mock-live-pg-model"
+    provider = MockEmbeddingProvider(dimension=1536, model_name=target_model)
+    pipeline = DocumentIngestionPipeline(pg_session, embedding_provider=provider)
+
+    # Ingest document into PostgreSQL
+    ingest_res = await pipeline.ingest_document(
+        title="Live Visa Dispute 10.4 Policy",
+        source_id="internal://test/visa-10-4-live",
+        source_type="scheme_rules",
+        content="""# Visa Dispute Condition 10.4
+## Liability Shift Rules
+When EMV 3-D Secure version 2.2 returns ECI 05, liability shifts directly to issuer.
+Merchant provides CAVV and Directory Server Trans ID to invalidate the dispute.
+""",
+        force_reindex=True,
+    )
+    assert ingest_res.status in ("success", "lexical_only")
+
+    # Run hybrid retrieval
+    retrieval_service = HybridRetrievalService(pg_session, embedding_provider=provider)
+    search_res = await retrieval_service.search(
+        query="EMV 3-D Secure liability shift CAVV",
+        top_k=3,
+        retrieval_mode="hybrid",
+    )
+
+    assert len(search_res.results) >= 1
+    top_result = search_res.results[0]
+    assert top_result.ranking.fusion_score > 0.0
+    assert "CAVV" in top_result.content or "liability" in top_result.content.lower()
+
+    # Clean up
+    doc = await pg_session.get(KnowledgeDocument, ingest_res.document_id)
+    if doc:
+        await pg_session.delete(doc)
+        await pg_session.commit()
