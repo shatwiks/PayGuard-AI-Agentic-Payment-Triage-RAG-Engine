@@ -23,18 +23,40 @@ def create_application() -> FastAPI:
         ),
     )
 
-    # Set up CORS middleware
+    # 1. Custom Security and Tracing Middlewares
+    from backend.app.core.middleware import (
+        RequestBodyLimitMiddleware,
+        RequestIDMiddleware,
+        SecurityHeadersMiddleware,
+    )
+
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(RequestIDMiddleware)
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_body_bytes=settings.REQUEST_MAX_BODY_BYTES,
+    )
+
+    # 2. Set up CORS middleware
     if settings.BACKEND_CORS_ORIGINS:
+        origins = [str(origin) for origin in settings.BACKEND_CORS_ORIGINS]
+        # Prevent insecure wildcard with credentials
+        allow_cred = True
+        if "*" in origins:
+            allow_cred = False
+
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=[str(origin) for origin in settings.BACKEND_CORS_ORIGINS],
-            allow_credentials=True,
-            allow_methods=["*"],
+            allow_origins=origins,
+            allow_credentials=allow_cred,
+            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             allow_headers=["*"],
+            expose_headers=["X-Request-ID"],
         )
 
-    # Register standardized error handlers
+    # 3. Register standardized error handlers
     register_error_handlers(app)
+
 
     # Mount master API v1 router
     app.include_router(api_router, prefix=settings.API_V1_STR)
