@@ -1,8 +1,22 @@
-"""Investigation Orchestration Service coordinating the triage pipeline."""
+"""Investigation Orchestration Service coordinating the agentic payment triage pipeline.
+
+Executes the 11 explicit investigation lifecycle stages:
+1. Validate & sanitize PII in request query.
+2. Lookup payment and chronological events via PaymentLookupTool.
+3. Execute deterministic triage classification via PaymentTriageTool.
+4. Retrieve authoritative policy documents via KnowledgeRetrievalTool.
+5. Construct a structured, immutable evidence package.
+6. Generate grounded synthesis via InvestigationExplanationTool.
+7. Validate explanation and strictly ground citations against retrieved chunks.
+8. Persist InvestigationCase & InvestigationResult with transactional atomicity.
+9. Record audit event via AuditTool.
+10. Reload and return strongly typed InvestigationCaseResponse.
+"""
 
 from datetime import datetime, timezone
+import logging
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -23,17 +37,20 @@ from backend.app.services.interfaces import (
     IRagService,
     ITriageEngine,
 )
+from backend.app.services.tools import (
+    AuditTool,
+    InvestigationExplanationTool,
+    KnowledgeRetrievalTool,
+    PaymentLookupTool,
+    PaymentTriageTool,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class OrchestrationService(IOrchestrationService):
-    """Coordinates the entire payment investigation lifecycle:
-    1. Validate & sanitize PII
-    2. Lookup payment record (if reference provided)
-    3. Run deterministic triage engine
-    4. Retrieve relevant policy chunks via pgvector RAG
-    5. Generate grounded explanation via LLM reasoning
-    6. Persist investigation case and result
-    7. Record immutable audit events
+    """End-to-end payment dispute triage orchestrator.
+    Coordinates controlled investigation tools to ensure grounded, verifiable resolutions.
     """
 
     def __init__(
@@ -52,6 +69,13 @@ class OrchestrationService(IOrchestrationService):
         self.llm_service = llm_service
         self.audit_service = audit_service
 
+        # Instantiate bounded investigation tools
+        self.payment_lookup_tool = PaymentLookupTool(payment_service)
+        self.triage_tool = PaymentTriageTool(triage_engine)
+        self.retrieval_tool = KnowledgeRetrievalTool(rag_service)
+        self.explanation_tool = InvestigationExplanationTool(llm_service)
+        self.audit_tool = AuditTool(audit_service)
+
     async def run_investigation(
         self,
         request: InvestigationCreateRequest,
@@ -59,47 +83,66 @@ class OrchestrationService(IOrchestrationService):
     ) -> InvestigationCaseResponse:
         start_time = time.perf_counter()
 
-        # Step 1: Sanitize and Mask PII
+        # Stage 1: Validate and mask PII in customer query
         sanitized_query = mask_pii(request.customer_query)
 
-        # Step 2: Fetch payment details if reference or ID provided
-        payment = None
-        if request.payment_id:
-            payment = await self.payment_service.get_payment_details(request.payment_id)
-        elif request.payment_reference:
-            payment = await self.payment_service.get_payment_by_reference(request.payment_reference)
+        # Stage 2: Retrieve payment and chronological event history
+        payment_lookup = await self.payment_lookup_tool.execute(
+            payment_id=request.payment_id,
+            payment_reference=request.payment_reference,
+        )
 
-        # Step 3: Run deterministic triage classification
-        triage_result = self.triage_engine.classify_payment_issue(
-            payment=payment,
+        # Stage 3: Deterministic payment triage evaluation
+        triage_result = self.triage_tool.execute(
+            payment_lookup=payment_lookup,
             user_query=sanitized_query,
         )
 
-        # Step 4: Retrieve policy citations via RAG
-        citations = await self.rag_service.retrieve_troubleshooting_docs(
+        # Stage 4: Retrieve relevant policy and troubleshooting documents via hybrid RAG
+        retrieval_result = await self.retrieval_tool.execute(
             query=sanitized_query,
             issue_category=triage_result.category,
             top_k=3,
         )
 
-        # Step 5: Generate grounded investigation summary via LLM
-        llm_output = await self.llm_service.generate_investigation_summary(
+        # Stage 5: Construct structured, verified evidence package
+        evidence_package: Dict[str, Any] = {
+            "payment_id": str(payment_lookup.payment_id) if payment_lookup.payment_id else None,
+            "payment_reference": payment_lookup.payment_reference,
+            "payment_status": payment_lookup.status,
+            "amount": str(payment_lookup.amount) if payment_lookup.amount else None,
+            "currency": payment_lookup.currency,
+            "gateway_name": payment_lookup.gateway_name,
+            "failure_code": payment_lookup.failure_code,
+            "events_count": len(payment_lookup.events),
+            "chronological_event_ids": triage_result.supporting_events,
+            "triage_category": triage_result.category,
+            "triage_rule_matched": triage_result.rule_id_matched,
+            "triage_confidence": triage_result.confidence_score,
+            "conflicts_detected": triage_result.conflicting_evidence,
+            "missing_evidence": triage_result.missing_evidence,
+            "retrieval_mode": retrieval_result.retrieval_mode,
+            "retrieved_chunks_count": retrieval_result.chunks_retrieved_count,
+        }
+
+        # Stage 6 & 7: Generate grounded synthesis and strictly validate citations
+        explanation_result = await self.explanation_tool.execute(
             user_query=sanitized_query,
-            payment=payment,
-            citations=citations,
-            triage_result=triage_result,
+            payment_lookup=payment_lookup,
+            triage_tool_result=triage_result,
+            retrieval_result=retrieval_result,
         )
 
         execution_time_ms = int((time.perf_counter() - start_time) * 1000)
 
-        # Step 6: Create and persist InvestigationCase & InvestigationResult
+        # Stage 8: Persist InvestigationCase & InvestigationResult atomically
         case_id = uuid.uuid4()
         case_number = f"CASE-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{str(case_id)[:8].upper()}"
 
         db_case = InvestigationCase(
             id=case_id,
             case_number=case_number,
-            payment_id=payment.id if payment else None,
+            payment_id=payment_lookup.payment_id if payment_lookup.found else None,
             created_by_user_id=current_user.id if current_user else None,
             customer_query=request.customer_query,
             sanitized_query=sanitized_query,
@@ -107,44 +150,58 @@ class OrchestrationService(IOrchestrationService):
             priority=request.priority or "medium",
         )
 
-        citations_data = [c.model_dump() for c in citations]
+        validated_citations_data = [c.model_dump() for c in explanation_result.validated_citations]
 
         db_result = InvestigationResult(
             id=uuid.uuid4(),
             case_id=case_id,
             issue_category=triage_result.category,
             confidence_score=triage_result.confidence_score,
-            investigation_summary=llm_output.investigation_summary,
-            recommended_action=llm_output.recommended_action,
-            recommended_action_details=llm_output.recommended_action_details,
-            policy_citations=citations_data,
-            missing_or_conflicting_info=llm_output.missing_or_conflicting_info,
-            human_review_required=llm_output.human_review_required or triage_result.is_ambiguous,
-            human_review_reason=llm_output.human_review_reason,
+            investigation_summary=explanation_result.investigation_summary,
+            recommended_action=explanation_result.recommended_action,
+            recommended_action_details=explanation_result.recommended_action_details,
+            policy_citations=validated_citations_data,
+            missing_or_conflicting_info=explanation_result.missing_or_conflicting_info,
+            human_review_required=explanation_result.human_review_required,
+            human_review_reason=explanation_result.human_review_reason,
             execution_time_ms=execution_time_ms,
-            llm_model_name=llm_output.model_name,
+            llm_model_name=explanation_result.model_name,
+            retrieval_mode=retrieval_result.retrieval_mode,
+            generation_mode=explanation_result.generation_mode,
+            evidence_package=evidence_package,
         )
 
-        self.session.add(db_case)
-        self.session.add(db_result)
-        await self.session.commit()
+        try:
+            self.session.add(db_case)
+            self.session.add(db_result)
+            await self.session.commit()
+        except Exception as exc:
+            await self.session.rollback()
+            logger.error("Failed to persist investigation case %s: %s", case_id, exc, exc_info=True)
+            raise exc
 
-        # Step 7: Record Audit Event
-        await self.audit_service.log_audit_event(
+        # Stage 9: Record immutable operational audit event
+        await self.audit_tool.execute(
             action="investigation_completed",
             resource_type="investigation_case",
             resource_id=str(case_id),
             user_id=current_user.id if current_user else None,
             case_id=case_id,
             details={
+                "case_number": case_number,
+                "payment_reference": payment_lookup.payment_reference,
                 "issue_category": triage_result.category,
+                "rule_matched": triage_result.rule_id_matched,
                 "confidence": triage_result.confidence_score,
+                "retrieval_mode": retrieval_result.retrieval_mode,
+                "generation_mode": explanation_result.generation_mode,
                 "execution_time_ms": execution_time_ms,
                 "human_review_required": db_result.human_review_required,
+                "rejected_citations": explanation_result.rejected_citations_count,
             },
         )
 
-        # Reload with relationships
+        # Stage 10: Reload with relationships and return validated response
         stmt = (
             select(InvestigationCase)
             .where(InvestigationCase.id == case_id)
