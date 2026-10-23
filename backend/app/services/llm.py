@@ -1,23 +1,56 @@
-"""LLM Reasoning Service for generating grounded investigation explanations."""
+"""LLM Reasoning Service for generating grounded payment investigation explanations.
 
-from typing import List, Optional
+Supports:
+1. Live OpenAI Chat Completions API with structured JSON output and strict bounding.
+2. Deterministic rule-based fallback when offline, unconfigured, or timed out.
+3. Strict citation referencing of retrieved policy excerpts.
+"""
 
-from backend.app.schemas.payment import PaymentDetailResponse
+import json
+import logging
+from typing import Any, Dict, List, Optional
+import httpx
+
+from backend.app.core.config import settings
 from backend.app.schemas.investigation import PolicyCitation
+from backend.app.schemas.payment import PaymentDetailResponse
 from backend.app.services.interfaces import (
     ILLMReasoningService,
     LLMInvestigationOutput,
     TriageClassificationResult,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class LLMReasoningService(ILLMReasoningService):
     """Generates structured investigation summaries strictly grounded in verified evidence.
-    Contains built-in deterministic fallbacks for offline development and testing.
+    Supports both live OpenAI LLM calls and deterministic fallbacks.
     """
 
-    def __init__(self, model_name: str = "gpt-4o-mini"):
-        self.model_name = model_name
+    def __init__(
+        self,
+        model_name: Optional[str] = None,
+        timeout_seconds: float = 20.0,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        self.model_name = model_name or "gpt-4o-mini"
+        self.timeout_seconds = timeout_seconds
+        self.api_key = api_key if api_key is not None else settings.OPENAI_API_KEY
+        self.base_url = (base_url or settings.OPENAI_BASE_URL).rstrip("/")
+
+    @property
+    def is_live_provider(self) -> bool:
+        """Indicates whether valid live provider credentials are configured."""
+        if not self.api_key:
+            return False
+        cleaned = self.api_key.strip().lower()
+        if cleaned in ("mock-key", "test-key", "none", "", "placeholder"):
+            return False
+        if cleaned.startswith("sk-placeholder") or cleaned.startswith("mock"):
+            return False
+        return True
 
     async def generate_investigation_summary(
         self,
@@ -27,81 +60,270 @@ class LLMReasoningService(ILLMReasoningService):
         triage_result: TriageClassificationResult,
     ) -> LLMInvestigationOutput:
         """Grounded synthesis of payment evidence and policy citations."""
+        if self.is_live_provider:
+            try:
+                live_result = await self._call_live_openai(
+                    user_query=user_query,
+                    payment=payment,
+                    citations=citations,
+                    triage_result=triage_result,
+                )
+                if live_result:
+                    return live_result
+            except Exception as exc:
+                logger.warning(
+                    "Live LLM provider request failed (%s). Degrading gracefully to deterministic fallback.",
+                    exc,
+                )
+
+        return self._deterministic_fallback(
+            user_query=user_query,
+            payment=payment,
+            citations=citations,
+            triage_result=triage_result,
+        )
+
+    async def _call_live_openai(
+        self,
+        user_query: str,
+        payment: Optional[PaymentDetailResponse],
+        citations: List[PolicyCitation],
+        triage_result: TriageClassificationResult,
+    ) -> Optional[LLMInvestigationOutput]:
+        """Executes structured chat completion against OpenAI endpoint."""
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Build grounded system and user prompts
+        system_prompt = (
+            "You are PayGuard AI, an evidence-grounded payment dispute investigation engine. "
+            "You MUST base your reasoning strictly and exclusively on the provided verified payment facts, "
+            "event records, and retrieved policy citations. Do NOT hallucinate gateway events, cardholder actions, "
+            "or bank outcomes. Distinguish verified facts from hypotheses. "
+            "Output must be a valid JSON object matching the requested schema."
+        )
+
+        payment_summary = "No payment record found."
+        events_summary = "No event history."
+        if payment:
+            payment_summary = (
+                f"Payment Ref: {payment.payment_reference}, Amount: {payment.amount} {payment.currency}, "
+                f"Status: {payment.status}, Gateway: {payment.gateway_name}, Failure Code: {payment.failure_code or 'None'}, "
+                f"Failure Message: {payment.failure_message or 'None'}, Authorized At: {payment.authorized_at}, "
+                f"Captured At: {payment.captured_at}"
+            )
+            if payment.events:
+                events_summary = " -> ".join([
+                    f"[{e.occurred_at.isoformat()}] {e.event_type} (to {e.to_status})"
+                    for e in sorted(payment.events, key=lambda x: x.occurred_at)
+                ])
+
+        citations_text = "\n".join([
+            f"- [{c.chunk_id or 'CHUNK_N/A'}] {c.document_title} ({c.section_header}): {c.excerpt[:300]}"
+            for c in citations
+        ]) if citations else "No policy citations retrieved."
+
+        user_content = (
+            f"CUSTOMER QUERY: {user_query}\n\n"
+            f"VERIFIED PAYMENT DATA:\n{payment_summary}\n\n"
+            f"EVENT TIMELINE:\n{events_summary}\n\n"
+            f"DETERMINISTIC TRIAGE CLASSIFICATION:\n"
+            f"Category: {triage_result.category}, Rule: {triage_result.rule_id_matched}, "
+            f"Confidence: {triage_result.confidence_score}, "
+            f"Conflicts: {', '.join(triage_result.conflicting_evidence) or 'None'}\n\n"
+            f"RETRIEVED POLICY CITATIONS:\n{citations_text}\n\n"
+            f"Return JSON with keys: 'investigation_summary', 'likely_cause', 'recommended_action', "
+            f"'recommended_action_details', 'missing_or_conflicting_info' (list of strings), "
+            f"'human_review_required' (boolean), 'human_review_reason' (string or null)."
+        )
+
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.1,
+            "max_tokens": 800,
+        }
+
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                logger.warning("OpenAI API returned status %d: %s", resp.status_code, resp.text[:200])
+                return None
+
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+
+            return LLMInvestigationOutput(
+                investigation_summary=parsed.get("investigation_summary", ""),
+                recommended_action=parsed.get("recommended_action", triage_result.recommended_action),
+                recommended_action_details=parsed.get("recommended_action_details", triage_result.recommended_action_details),
+                missing_or_conflicting_info=parsed.get("missing_or_conflicting_info", triage_result.missing_fields),
+                human_review_required=parsed.get("human_review_required", triage_result.is_ambiguous),
+                human_review_reason=parsed.get("human_review_reason"),
+                model_name=self.model_name,
+                likely_cause=parsed.get("likely_cause"),
+                generation_mode="llm_openai",
+                cited_chunks=citations,
+            )
+
+    def _deterministic_fallback(
+        self,
+        user_query: str,
+        payment: Optional[PaymentDetailResponse],
+        citations: List[PolicyCitation],
+        triage_result: TriageClassificationResult,
+    ) -> LLMInvestigationOutput:
+        """Deterministic, grounded explanation generator based on verified records and triage rules."""
         category = triage_result.category
+        citations_summary = ""
+        if citations:
+            top_cit = citations[0]
+            citations_summary = f" Grounded in {top_cit.document_title} ({top_cit.section_header})."
 
         if not payment:
             return LLMInvestigationOutput(
                 investigation_summary=(
                     f"No transaction record was found matching the provided reference. "
                     f"Issue classified as '{category}'. Additional transaction details are required."
+                    f"{citations_summary}"
                 ),
-                recommended_action="REQUEST_PAYMENT_DETAILS",
-                recommended_action_details="Ask the customer to provide a valid transaction ID, card last 4 digits, or charge timestamp.",
-                missing_or_conflicting_info=["payment_record"],
+                recommended_action=triage_result.recommended_action,
+                recommended_action_details=triage_result.recommended_action_details,
+                missing_or_conflicting_info=triage_result.missing_fields,
                 human_review_required=True,
                 human_review_reason="Missing authoritative payment record in system of record.",
-                model_name=self.model_name,
+                model_name=f"{self.model_name} (deterministic fallback)",
+                likely_cause="Invalid payment reference or transaction not registered in processor database.",
+                generation_mode="deterministic_fallback",
+                cited_chunks=citations,
+            )
+
+        if triage_result.conflicting_evidence:
+            conflicts_desc = "; ".join(triage_result.conflicting_evidence)
+            return LLMInvestigationOutput(
+                investigation_summary=(
+                    f"Investigation of transaction {payment.payment_reference} ({payment.amount} {payment.currency}) "
+                    f"identified conflicting state transitions in the payment event timeline: {conflicts_desc}. "
+                    f"Payment status is currently recorded as '{payment.status}'.{citations_summary}"
+                ),
+                recommended_action=triage_result.recommended_action,
+                recommended_action_details=triage_result.recommended_action_details,
+                missing_or_conflicting_info=triage_result.conflicting_evidence + triage_result.missing_fields,
+                human_review_required=True,
+                human_review_reason=f"Conflicting transaction event history: {conflicts_desc}",
+                model_name=f"{self.model_name} (deterministic fallback)",
+                likely_cause="Asynchronous or duplicate webhook deliveries caused out-of-order state transitions.",
+                generation_mode="deterministic_fallback",
+                cited_chunks=citations,
+            )
+
+        if "TIMEOUT" in (triage_result.rule_id_matched or ""):
+            return LLMInvestigationOutput(
+                investigation_summary=(
+                    f"Payment {payment.payment_reference} ({payment.amount} {payment.currency}) experienced a gateway timeout. "
+                    f"Recorded status is '{payment.status}'. Notice: A gateway timeout does not prove payment failure, "
+                    f"as the transaction may have succeeded upstream at the processor.{citations_summary}"
+                ),
+                recommended_action=triage_result.recommended_action,
+                recommended_action_details=triage_result.recommended_action_details,
+                missing_or_conflicting_info=triage_result.missing_fields,
+                human_review_required=True,
+                human_review_reason="Unconfirmed payment outcome due to upstream gateway timeout.",
+                model_name=f"{self.model_name} (deterministic fallback)",
+                likely_cause="Network timeout between payment orchestrator and acquiring bank.",
+                generation_mode="deterministic_fallback",
+                cited_chunks=citations,
             )
 
         if category == "failed_payment":
             return LLMInvestigationOutput(
                 investigation_summary=(
-                    f"Transaction {payment.payment_reference} for {payment.amount} {payment.currency} failed at the gateway. "
-                    f"Reported gateway failure code: '{payment.failure_code or 'UNKNOWN'}'. Reason: {payment.failure_message or 'Declined by issuing bank'}."
+                    f"Transaction {payment.payment_reference} for {payment.amount} {payment.currency} failed at gateway '{payment.gateway_name}'. "
+                    f"Reported gateway failure code: '{payment.failure_code or 'UNKNOWN'}'. Reason: {payment.failure_message or 'Declined by issuing bank'}. "
+                    f"Verified terminal state reached at {payment.updated_at}.{citations_summary}"
                 ),
-                recommended_action="NOTIFY_CUSTOMER_RETRY",
-                recommended_action_details="Inform customer of card decline reason and recommend alternative payment method.",
-                missing_or_conflicting_info=[],
+                recommended_action=triage_result.recommended_action,
+                recommended_action_details=triage_result.recommended_action_details,
+                missing_or_conflicting_info=triage_result.missing_fields,
                 human_review_required=False,
-                model_name=self.model_name,
+                model_name=f"{self.model_name} (deterministic fallback)",
+                likely_cause=payment.failure_message or f"Processor decline with code {payment.failure_code}",
+                generation_mode="deterministic_fallback",
+                cited_chunks=citations,
             )
 
         if category == "duplicate_charge":
             return LLMInvestigationOutput(
                 investigation_summary=(
-                    f"Investigation identified inquiry regarding duplicate debit for payment {payment.payment_reference}. "
-                    f"Current recorded status is '{payment.status}'. If an authorization hold is present, it will expire automatically per scheme rules."
+                    f"Investigation identified customer inquiry regarding duplicate debit for payment {payment.payment_reference}. "
+                    f"Current recorded status is '{payment.status}'. Notice: Duplicate charge suspicion is not proof of two completed captures. "
+                    f"Dual authorizations often represent temporary holds that expire automatically.{citations_summary}"
                 ),
-                recommended_action="VOID_PENDING_AUTHORIZATION",
-                recommended_action_details="Verify secondary authorization hold in processor portal and release if unsettled.",
-                missing_or_conflicting_info=[],
+                recommended_action=triage_result.recommended_action,
+                recommended_action_details=triage_result.recommended_action_details,
+                missing_or_conflicting_info=triage_result.missing_fields,
                 human_review_required=False,
-                model_name=self.model_name,
+                model_name=f"{self.model_name} (deterministic fallback)",
+                likely_cause="Secondary authorization hold created during checkout retry.",
+                generation_mode="deterministic_fallback",
+                cited_chunks=citations,
             )
 
         if category == "pending_payment":
+            auth_note = f"Authorized at {payment.authorized_at}." if payment.authorized_at else "Awaiting initial gateway capture."
             return LLMInvestigationOutput(
                 investigation_summary=(
                     f"Payment {payment.payment_reference} of {payment.amount} {payment.currency} is currently in '{payment.status}' status. "
-                    f"Authorized at {payment.authorized_at or payment.created_at}. Awaiting batch settlement confirmation."
+                    f"{auth_note} Transaction has not reached terminal state and is within standard processing windows.{citations_summary}"
                 ),
-                recommended_action="WAIT_SETTLEMENT_WINDOW",
-                recommended_action_details="Advise customer that settlement is within standard 24-48 hour banking window.",
-                missing_or_conflicting_info=[],
+                recommended_action=triage_result.recommended_action,
+                recommended_action_details=triage_result.recommended_action_details,
+                missing_or_conflicting_info=triage_result.missing_fields,
                 human_review_required=False,
-                model_name=self.model_name,
+                model_name=f"{self.model_name} (deterministic fallback)",
+                likely_cause="Standard settlement or authorization hold window in progress.",
+                generation_mode="deterministic_fallback",
+                cited_chunks=citations,
             )
 
         if category == "refund_status":
             return LLMInvestigationOutput(
                 investigation_summary=(
                     f"Payment {payment.payment_reference} status is '{payment.status}'. "
-                    f"Refund processing typically reflects on cardholder statements within 3-5 business days."
+                    f"Refund processing requires 3-5 business days to post to cardholder statements. "
+                    f"Acquirer Reference Number (ARN) should be referenced for banking traces.{citations_summary}"
                 ),
-                recommended_action="CONFIRM_REFUND_TIMELINE",
-                recommended_action_details="Confirm ARN (Acquirer Reference Number) with customer to trace credit at issuing bank.",
-                missing_or_conflicting_info=[],
+                recommended_action=triage_result.recommended_action,
+                recommended_action_details=triage_result.recommended_action_details,
+                missing_or_conflicting_info=triage_result.missing_fields,
                 human_review_required=False,
-                model_name=self.model_name,
+                model_name=f"{self.model_name} (deterministic fallback)",
+                likely_cause="Inter-bank clearing delay for card scheme refund credit.",
+                generation_mode="deterministic_fallback",
+                cited_chunks=citations,
             )
 
-        # Fallback for unknown
+        # Fallback for unknown_or_other
         return LLMInvestigationOutput(
-            investigation_summary=f"Query regarding transaction {payment.payment_reference} requires manual analyst review.",
-            recommended_action="ESCALATE_TO_ANALYST",
-            recommended_action_details="Assign case to senior payment operations engineer for manual ledger inspection.",
-            missing_or_conflicting_info=["unclassified_intent"],
+            investigation_summary=(
+                f"Query regarding transaction {payment.payment_reference} (Status: '{payment.status}') "
+                f"did not match an automated failure pattern. Human analyst review recommended.{citations_summary}"
+            ),
+            recommended_action=triage_result.recommended_action,
+            recommended_action_details=triage_result.recommended_action_details,
+            missing_or_conflicting_info=["unclassified_intent"] + triage_result.missing_fields,
             human_review_required=True,
             human_review_reason="Ambiguous issue category or unmapped transaction event pattern.",
-            model_name=self.model_name,
+            model_name=f"{self.model_name} (deterministic fallback)",
+            likely_cause="Non-standard inquiry requiring specialized merchant support intervention.",
+            generation_mode="deterministic_fallback",
+            cited_chunks=citations,
         )
