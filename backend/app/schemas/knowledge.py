@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 import uuid
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class KnowledgeSearchRequest(BaseModel):
@@ -52,7 +52,13 @@ class SearchResultItem(BaseModel):
     content: str = Field(description="Verbatim chunk text content")
     token_count: int = Field(description="Estimated token count")
     embedding_model: Optional[str] = Field(default=None, description="Model identifier used to produce embedding")
+    retrieval_mode: Optional[str] = Field(default="hybrid", description="Retrieval mode used for this result")
     ranking: RankingDetails = Field(description="Scoring and ranking diagnostics")
+
+    @computed_field
+    @property
+    def text(self) -> str:
+        return self.content
 
 
 class KnowledgeSearchResponse(BaseModel):
@@ -62,3 +68,12 @@ class KnowledgeSearchResponse(BaseModel):
     total_candidates: int = Field(description="Total candidate chunks evaluated before filtering")
     results_count: int = Field(description="Number of results returned in this response")
     results: List[SearchResultItem] = Field(default_factory=list, description="Ranked list of relevant chunks")
+
+    def __iter__(self):
+        return iter(self.results)
+
+    def __getitem__(self, idx):
+        return self.results[idx]
+
+    def __len__(self):
+        return len(self.results)

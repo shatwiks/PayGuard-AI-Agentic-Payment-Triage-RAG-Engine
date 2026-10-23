@@ -2,9 +2,9 @@
 
 import hashlib
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import uuid
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -28,6 +28,8 @@ class IngestionDocumentRequest(BaseModel):
 
 class IngestionResult(BaseModel):
     """Result summary of document ingestion."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     document_id: uuid.UUID
     title: str
     source_id: str
@@ -36,6 +38,12 @@ class IngestionResult(BaseModel):
     embedding_model: Optional[str] = None
     status: str = Field(description="Ingestion status: success, skipped_unchanged, lexical_only, failed")
     message: str
+    document: Optional[Any] = None
+    chunks: Optional[List[Any]] = None
+
+    def __iter__(self):
+        yield self.document
+        yield self.chunks or []
 
 
 class DocumentIngestionPipeline:
@@ -53,10 +61,32 @@ class DocumentIngestionPipeline:
 
     async def ingest_document(
         self,
-        request: IngestionDocumentRequest,
+        request: Optional[IngestionDocumentRequest] = None,
+        *,
+        title: Optional[str] = None,
+        doc_type: str = "scheme_rules",
+        source_type: Optional[str] = None,
+        version: str = "1.0",
+        source_id: Optional[str] = None,
+        source_url: Optional[str] = None,
+        raw_content: Optional[str] = None,
+        content: Optional[str] = None,
+        metadata: Optional[dict] = None,
         force_reindex: bool = False,
     ) -> IngestionResult:
         """Ingests a document with deduplication, chunking, and optional vector generation."""
+        if request is None:
+            effective_content = raw_content or content or ""
+            effective_source_id = source_id or f"internal://policies/{(title or 'doc').lower().replace(' ', '-')}"
+            request = IngestionDocumentRequest(
+                title=title or "Untitled Document",
+                doc_type=source_type or doc_type,
+                version=version,
+                source_id=effective_source_id,
+                source_url=source_url,
+                raw_content=effective_content,
+            )
+
         content_hash = hashlib.sha256(request.raw_content.encode("utf-8")).hexdigest()
 
         # Check for existing document by source_id or title
@@ -87,6 +117,8 @@ class DocumentIngestionPipeline:
                         embedding_model=target_model,
                         status="skipped_unchanged",
                         message="Document content and embeddings are up-to-date. Skipped re-embedding.",
+                        document=existing_doc,
+                        chunks=list(existing_doc.chunks),
                     )
 
         # 1. Normalize and chunk text
@@ -148,6 +180,7 @@ class DocumentIngestionPipeline:
         await self.session.flush()
 
         # Insert new chunks
+        created_chunks: List[DocumentChunk] = []
         for idx, chunk in enumerate(chunks):
             db_chunk = DocumentChunk(
                 id=uuid.uuid4(),
@@ -167,6 +200,7 @@ class DocumentIngestionPipeline:
                 },
             )
             self.session.add(db_chunk)
+            created_chunks.append(db_chunk)
 
         await self.session.commit()
 
@@ -186,4 +220,6 @@ class DocumentIngestionPipeline:
             embedding_model=target_model,
             status=status_str,
             message=msg,
+            document=doc_obj,
+            chunks=created_chunks,
         )

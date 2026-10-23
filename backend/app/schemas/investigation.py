@@ -42,6 +42,18 @@ class PolicyCitation(BaseModel):
     chunk_id: Optional[uuid.UUID] = Field(default=None, description="UUID of cited chunk")
     is_synthetic_demonstration: bool = Field(default=True, description="Flag indicating synthetic demonstration status")
 
+    @property
+    def title(self) -> str:
+        return self.document_title
+
+    @property
+    def exact_passage(self) -> str:
+        return self.excerpt
+
+    @property
+    def relevant_section(self) -> str:
+        return self.section_header
+
 
 class InvestigationResultResponse(BaseModel):
     """Structured evidence, classification, and recommended next steps."""
