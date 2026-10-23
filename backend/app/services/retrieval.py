@@ -108,23 +108,33 @@ class HybridRetrievalService:
         results: List[LexicalSearchResult] = []
 
         if self._is_postgresql():
-            # Native PostgreSQL Full-Text Search over generated tsvector column
+            import re
+            raw_terms = [w.strip() for w in re.findall(r"\b[A-Za-z0-9_.-]{2,}\b", search_query) if w.isalnum()]
+            or_tsquery = " | ".join(raw_terms) if raw_terms else None
+
+            exact_q = func.plainto_tsquery("english", search_query)
+
+            if or_tsquery:
+                or_q = func.to_tsquery("english", or_tsquery)
+                match_condition = or_(DocumentChunk.tsv.op("@@")(exact_q), DocumentChunk.tsv.op("@@")(or_q))
+                score_expr = (func.ts_rank_cd(DocumentChunk.tsv, exact_q) * 2.0 + func.ts_rank_cd(DocumentChunk.tsv, or_q)).label("score")
+            else:
+                match_condition = DocumentChunk.tsv.op("@@")(exact_q)
+                score_expr = func.ts_rank_cd(DocumentChunk.tsv, exact_q).label("score")
+
             stmt = (
-                select(
-                    DocumentChunk,
-                    func.ts_rank_cd(DocumentChunk.tsv, func.plainto_tsquery("english", search_query)).label("score"),
-                )
+                select(DocumentChunk, score_expr)
                 .join(DocumentChunk.document)
                 .where(
                     KnowledgeDocument.is_active == True,  # noqa: E712
-                    DocumentChunk.tsv.op("@@")(func.plainto_tsquery("english", search_query)),
+                    match_condition,
                 )
                 .options(selectinload(DocumentChunk.document))
             )
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
-            stmt = stmt.order_by(func.ts_rank_cd(DocumentChunk.tsv, func.plainto_tsquery("english", search_query)).desc())
+            stmt = stmt.order_by(score_expr.desc())
             stmt = stmt.limit(eff_limit)
 
             res = await self.session.execute(stmt)

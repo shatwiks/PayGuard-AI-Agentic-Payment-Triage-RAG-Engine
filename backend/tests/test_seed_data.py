@@ -68,27 +68,27 @@ async def test_seed_payments_and_events_distribution(db_session: AsyncSession):
 async def test_seed_knowledge_documents_provenance(db_session: AsyncSession):
     """Verify policy documents have valid metadata, source provenance, and chunk splits."""
     docs_first = await seed_knowledge_documents(db_session)
-    assert len(docs_first) == 4
+    assert len(docs_first) == 5
 
     doc_count = (await db_session.execute(select(func.count(KnowledgeDocument.id)))).scalar_one()
     chunk_count = (await db_session.execute(select(func.count(DocumentChunk.id)))).scalar_one()
 
-    assert doc_count == 4
-    assert chunk_count == 8
+    assert doc_count == 5
+    assert chunk_count == 10
 
     # Verify provenance on documents
     for doc in docs_first:
         assert doc.source_url is not None
-        assert doc.doc_type in ("scheme_rules", "refund_policy", "dispute_guide", "sla_spec")
+        assert doc.doc_type in ("scheme_rules", "refund_policy", "dispute_guide", "sla_spec", "troubleshooting_guide")
         assert doc.version is not None
         assert len(doc.title) > 5
 
     # Re-running seed must be idempotent
     docs_second = await seed_knowledge_documents(db_session)
-    assert len(docs_second) == 4
+    assert len(docs_second) == 5
 
     doc_count_after = (await db_session.execute(select(func.count(KnowledgeDocument.id)))).scalar_one()
     chunk_count_after = (await db_session.execute(select(func.count(DocumentChunk.id)))).scalar_one()
 
-    assert doc_count_after == 4
+    assert doc_count_after == 5
     assert chunk_count_after == chunk_count
