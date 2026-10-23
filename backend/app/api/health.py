@@ -42,10 +42,13 @@ async def get_health(
         else:
             vector_status = "sqlite_fallback_ready"
     except Exception as e:
-        db_status = f"unhealthy: {str(e)[:100]}"
+        import logging
+        logging.getLogger("payguard.health").warning("Database health probe check failed: %s", e)
+        db_status = "unhealthy"
         vector_status = "unavailable"
         overall_status = "degraded"
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
 
     return HealthResponse(
         status=overall_status,
