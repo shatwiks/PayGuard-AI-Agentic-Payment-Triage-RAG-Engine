@@ -10,7 +10,8 @@ authors = [
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
-    "pydantic>=2.9.0",
+    "pydantic[email]>=2.9.0",
+    "email-validator>=2.0.0",
     "pydantic-settings>=2.6.0",
     "sqlalchemy[asyncio]>=2.0.35",
     "asyncpg>=0.30.0",
@@ -43,7 +44,7 @@ include = ["backend*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["backend/tests"]
-pythonpath = ["backend", "."]
+pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]

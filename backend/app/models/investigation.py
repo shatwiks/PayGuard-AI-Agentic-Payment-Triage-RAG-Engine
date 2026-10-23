@@ -1,16 +1,19 @@
 """InvestigationCase and InvestigationResult models for payment support workflows."""
 
+from datetime import datetime
 import uuid
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import JSON
