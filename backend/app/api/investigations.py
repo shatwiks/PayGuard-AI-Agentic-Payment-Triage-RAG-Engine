@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.core.database import get_db
-from backend.app.core.errors import EntityNotFoundException
+from backend.app.core.errors import EntityNotFoundException, ForbiddenException, UnauthorizedException
+from backend.app.core.rate_limit import rate_limit
 from backend.app.models.investigation import InvestigationCase
 from backend.app.schemas.common import PaginatedResponse
 from backend.app.schemas.investigation import (
@@ -26,6 +27,7 @@ from backend.app.services.triage import TriageRulesEngine
 from backend.app.core.security import get_optional_current_user
 from backend.app.models.user import User
 from backend.app.schemas.auth import UserResponse
+from backend.app.core.config import settings
 
 router = APIRouter(prefix="/investigations", tags=["Investigations"])
 
@@ -41,6 +43,7 @@ async def create_investigation(
     request: InvestigationCreateRequest,
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user),
+    _rate_guard: None = Depends(rate_limit("create_investigation", max_requests=settings.RATE_LIMIT_INVESTIGATIONS_PER_MINUTE)),
 ) -> InvestigationCaseResponse:
     # Instantiate modular service layers
     payment_service = PaymentService(db)
@@ -67,11 +70,12 @@ async def create_investigation(
     response_model=InvestigationCaseResponse,
     status_code=status.HTTP_200_OK,
     summary="Get Investigation Case by ID",
-    description="Retrieve full investigation record, including triage result, evidence citations, and recommended action.",
+    description="Retrieve full investigation record, including triage result, evidence citations, and recommended action with role-based access control.",
 )
 async def get_investigation(
     investigation_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
 ) -> InvestigationCaseResponse:
     stmt = (
         select(InvestigationCase)
@@ -86,6 +90,13 @@ async def get_investigation(
     if not case_obj:
         raise EntityNotFoundException("InvestigationCase", str(investigation_id))
 
+    # Enforce ownership / authorization checks
+    if case_obj.created_by_user_id is not None:
+        if not current_user:
+            raise UnauthorizedException("Authentication required to access this private investigation case.")
+        if current_user.role not in ("admin", "compliance_analyst") and current_user.id != case_obj.created_by_user_id:
+            raise ForbiddenException("You do not have permission to access another operator's private investigation case.")
+
     return InvestigationCaseResponse.model_validate(case_obj)
 
 
@@ -94,7 +105,7 @@ async def get_investigation(
     response_model=PaginatedResponse[InvestigationCaseResponse],
     status_code=status.HTTP_200_OK,
     summary="List and Filter Investigation Cases",
-    description="Retrieve paginated history of investigation cases filtered by status or priority.",
+    description="Retrieve paginated history of investigation cases filtered by status, priority, and user authorization scope.",
 )
 async def list_investigations(
     case_status: Optional[str] = Query(None, alias="status", description="Filter by case status"),
@@ -102,12 +113,23 @@ async def list_investigations(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
 ) -> PaginatedResponse[InvestigationCaseResponse]:
     conditions = []
     if case_status:
         conditions.append(InvestigationCase.status == case_status)
     if priority:
         conditions.append(InvestigationCase.priority == priority)
+
+    # Scoped filtering based on user permissions
+    if current_user and current_user.role == "support_agent":
+        conditions.append(
+            (InvestigationCase.created_by_user_id == current_user.id)
+            | (InvestigationCase.created_by_user_id == None)  # noqa: E711
+        )
+    elif not current_user:
+        # Unauthenticated users only see public unassigned test cases
+        conditions.append(InvestigationCase.created_by_user_id == None)  # noqa: E711
 
     count_stmt = select(func.count(InvestigationCase.id))
     if conditions:
@@ -139,3 +161,4 @@ async def list_investigations(
         page=page,
         page_size=page_size,
     )
+

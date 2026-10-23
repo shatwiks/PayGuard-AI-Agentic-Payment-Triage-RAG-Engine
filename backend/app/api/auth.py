@@ -15,6 +15,9 @@ from backend.app.schemas.auth import (
 )
 from backend.app.services.user import UserService
 
+from backend.app.core.config import settings
+from backend.app.core.rate_limit import rate_limit
+
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
@@ -28,6 +31,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 async def register(
     request: UserCreateRequest,
     db: AsyncSession = Depends(get_db),
+    _rate_guard: None = Depends(rate_limit("user_register", max_requests=10)),
 ) -> UserResponse:
     service = UserService(db)
     user = await service.create_user(request)
@@ -44,7 +48,9 @@ async def register(
 async def login(
     request: LoginRequest,
     db: AsyncSession = Depends(get_db),
+    _rate_guard: None = Depends(rate_limit("user_login", max_requests=settings.RATE_LIMIT_LOGIN_PER_MINUTE)),
 ) -> TokenResponse:
+
     service = UserService(db)
     user = await service.authenticate(request.email, request.password)
 

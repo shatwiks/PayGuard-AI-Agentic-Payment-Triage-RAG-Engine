@@ -77,3 +77,24 @@ class KnowledgeSearchResponse(BaseModel):
 
     def __len__(self):
         return len(self.results)
+
+
+class KnowledgeIngestRequest(BaseModel):
+    """Payload to ingest an official policy document into the knowledge base."""
+    title: str = Field(min_length=3, max_length=255, description="Document title")
+    raw_content: str = Field(min_length=10, max_length=100000, description="Full policy text in Markdown format")
+    source_id: Optional[str] = Field(default=None, max_length=128, description="Stable source identifier")
+    document_type: str = Field(default="policy", max_length=64, description="Document type")
+    version: str = Field(default="1.0", max_length=32, description="Version string")
+    source_url: Optional[str] = Field(default=None, max_length=512, description="Source URL")
+
+
+class KnowledgeIngestResponse(BaseModel):
+    """Result of document ingestion and chunking."""
+    document_id: uuid.UUID
+    source_id: Optional[str]
+    title: str
+    chunks_created: int
+    content_hash: str
+    status: str
+
