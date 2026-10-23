@@ -13,7 +13,7 @@ Executes the 11 explicit investigation lifecycle stages:
 10. Reload and return strongly typed InvestigationCaseResponse.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import select
 
-from backend.app.core.security import mask_pii
+from backend.app.core.config import settings
+from backend.app.core.security import mask_pii, sanitize_prompt_input
 from backend.app.models.investigation import InvestigationCase, InvestigationResult
 from backend.app.schemas.auth import UserResponse
 from backend.app.schemas.investigation import (
@@ -43,6 +44,7 @@ from backend.app.services.tools import (
     KnowledgeRetrievalTool,
     PaymentLookupTool,
     PaymentTriageTool,
+    ToolRegistry,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,15 @@ class OrchestrationService(IOrchestrationService):
         self.explanation_tool = InvestigationExplanationTool(llm_service)
         self.audit_tool = AuditTool(audit_service)
 
+        # Explicit tool registry enforcing whitelisted tool access
+        self.tool_registry = ToolRegistry(
+            payment_lookup=self.payment_lookup_tool,
+            payment_triage=self.triage_tool,
+            knowledge_retrieval=self.retrieval_tool,
+            explanation=self.explanation_tool,
+            audit=self.audit_tool,
+        )
+
     async def run_investigation(
         self,
         request: InvestigationCreateRequest,
@@ -83,27 +94,66 @@ class OrchestrationService(IOrchestrationService):
     ) -> InvestigationCaseResponse:
         start_time = time.perf_counter()
 
+        # Idempotency Check: prevent duplicate writes on quick retries
+        if request.payment_id or request.payment_reference:
+            cutoff = datetime.now(timezone.utc) - timedelta(
+                seconds=settings.INVESTIGATION_IDEMPOTENCY_WINDOW_SECONDS
+            )
+            idempotency_conditions = [
+                InvestigationCase.customer_query == request.customer_query,
+                InvestigationCase.created_at >= cutoff,
+            ]
+            if request.payment_id:
+                idempotency_conditions.append(InvestigationCase.payment_id == request.payment_id)
+
+            existing_stmt = (
+                select(InvestigationCase)
+                .where(*idempotency_conditions)
+                .options(
+                    selectinload(InvestigationCase.payment),
+                    selectinload(InvestigationCase.result),
+                )
+                .order_by(InvestigationCase.created_at.desc())
+                .limit(1)
+            )
+            existing_res = await self.session.execute(existing_stmt)
+            existing_case = existing_res.scalar_one_or_none()
+            if existing_case:
+                logger.info(
+                    "Idempotency hit: returning existing recent case %s for query",
+                    existing_case.id,
+                )
+                return InvestigationCaseResponse.model_validate(existing_case)
+
         # Stage 1: Validate and mask PII in customer query
         sanitized_query = mask_pii(request.customer_query)
+        clean_query, injection_detected = sanitize_prompt_input(sanitized_query)
+        if injection_detected:
+            logger.warning("Prompt injection pattern detected and neutralized in customer query.")
+            sanitized_query = clean_query
 
-        # Stage 2: Retrieve payment and chronological event history
+        # Stage 2: Retrieve payment and chronological event history via verified tool
+        self.tool_registry.validate_tool_name("payment_lookup")
         payment_lookup = await self.payment_lookup_tool.execute(
             payment_id=request.payment_id,
             payment_reference=request.payment_reference,
         )
 
         # Stage 3: Deterministic payment triage evaluation
+        self.tool_registry.validate_tool_name("payment_triage")
         triage_result = self.triage_tool.execute(
             payment_lookup=payment_lookup,
             user_query=sanitized_query,
         )
 
         # Stage 4: Retrieve relevant policy and troubleshooting documents via hybrid RAG
+        self.tool_registry.validate_tool_name("knowledge_retrieval")
         retrieval_result = await self.retrieval_tool.execute(
             query=sanitized_query,
             issue_category=triage_result.category,
             top_k=3,
         )
+
 
         # Stage 5: Construct structured, verified evidence package
         evidence_package: Dict[str, Any] = {
