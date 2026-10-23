@@ -1,6 +1,7 @@
 """Authentication and authorization schemas."""
 
 from datetime import datetime
+from typing import Optional
 import uuid
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -9,6 +10,18 @@ class LoginRequest(BaseModel):
     """User credentials for obtaining JWT access token."""
     email: EmailStr = Field(description="Corporate user email address")
     password: str = Field(min_length=6, description="Account password")
+
+
+class UserCreateRequest(BaseModel):
+    """Payload to register a new user."""
+    email: EmailStr = Field(description="Corporate user email address")
+    password: str = Field(min_length=6, max_length=128, description="Account password")
+    full_name: str = Field(min_length=2, max_length=128, description="User full name")
+    role: Optional[str] = Field(
+        default="support_agent",
+        pattern="^(support_agent|compliance_analyst|admin)$",
+        description="Assigned role: support_agent, compliance_analyst, or admin",
+    )
 
 
 class TokenResponse(BaseModel):

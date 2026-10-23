@@ -42,7 +42,7 @@ class PaymentDetailResponse(PaymentSummaryResponse):
     gateway_transaction_id: Optional[str] = None
     failure_code: Optional[str] = None
     failure_message: Optional[str] = None
-    metadata_: Dict[str, Any] = Field(default_factory=dict, alias="metadata")
+    metadata_: Dict[str, Any] = Field(default_factory=dict, serialization_alias="metadata")
     authorized_at: Optional[datetime] = None
     captured_at: Optional[datetime] = None
     updated_at: datetime

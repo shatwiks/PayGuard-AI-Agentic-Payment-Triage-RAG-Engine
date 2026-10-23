@@ -35,3 +35,20 @@ class AuditService(IAuditService):
         )
         self.session.add(audit_event)
         await self.session.commit()
+
+    async def get_audit_events(
+        self,
+        case_id: Optional[uuid.UUID] = None,
+        user_id: Optional[uuid.UUID] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[AuditEvent]:
+        from sqlalchemy import select
+        query = select(AuditEvent).order_by(AuditEvent.timestamp.desc())
+        if case_id:
+            query = query.where(AuditEvent.case_id == case_id)
+        if user_id:
+            query = query.where(AuditEvent.user_id == user_id)
+        query = query.offset(offset).limit(min(limit, 100))
+        result = await self.session.execute(query)
+        return list(result.scalars().all())

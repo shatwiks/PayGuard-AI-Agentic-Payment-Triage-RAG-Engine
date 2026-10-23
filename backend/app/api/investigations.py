@@ -23,6 +23,10 @@ from backend.app.services.payment import PaymentService
 from backend.app.services.rag import RagService
 from backend.app.services.triage import TriageRulesEngine
 
+from backend.app.core.security import get_optional_current_user
+from backend.app.models.user import User
+from backend.app.schemas.auth import UserResponse
+
 router = APIRouter(prefix="/investigations", tags=["Investigations"])
 
 
@@ -36,6 +40,7 @@ router = APIRouter(prefix="/investigations", tags=["Investigations"])
 async def create_investigation(
     request: InvestigationCreateRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
 ) -> InvestigationCaseResponse:
     # Instantiate modular service layers
     payment_service = PaymentService(db)
@@ -53,7 +58,8 @@ async def create_investigation(
         audit_service=audit_service,
     )
 
-    return await orchestrator.run_investigation(request=request)
+    user_resp = UserResponse.model_validate(current_user) if current_user else None
+    return await orchestrator.run_investigation(request=request, current_user=user_resp)
 
 
 @router.get(

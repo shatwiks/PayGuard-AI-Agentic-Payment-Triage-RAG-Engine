@@ -47,6 +47,26 @@ class ForbiddenException(PayGuardException):
         )
 
 
+class ConflictException(PayGuardException):
+    """Raised when creating an entity that violates unique constraints."""
+    def __init__(self, message: str = "Resource conflict or duplicate entry"):
+        super().__init__(
+            message=message,
+            code="RESOURCE_CONFLICT",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+
+class DatabaseException(PayGuardException):
+    """Raised when database query or connection fails."""
+    def __init__(self, message: str = "Database operation failed"):
+        super().__init__(
+            message=message,
+            code="DATABASE_ERROR",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Registers standard RFC 7807 error envelopes for all custom and validation exceptions."""
 
