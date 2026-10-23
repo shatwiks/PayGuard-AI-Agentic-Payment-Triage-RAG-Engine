@@ -74,7 +74,11 @@ class InvestigationResultResponse(BaseModel):
     human_review_reason: Optional[str] = Field(default=None, description="Explanation for human review requirement")
     execution_time_ms: int = Field(description="End-to-end investigation latency in milliseconds")
     llm_model_name: str = Field(description="Model identifier used for grounded explanation generation")
+    retrieval_mode: str = Field(default="hybrid", description="Retrieval mode: hybrid, lexical, or none")
+    generation_mode: str = Field(default="deterministic_fallback", description="Generation mode: llm_openai or deterministic_fallback")
+    evidence_package: Optional[Dict[str, Any]] = Field(default=None, description="Structured verified evidence package")
     created_at: datetime
+
 
 
 class InvestigationCaseResponse(BaseModel):
