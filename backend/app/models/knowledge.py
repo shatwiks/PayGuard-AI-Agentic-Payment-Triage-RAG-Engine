@@ -12,13 +12,15 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
+from sqlalchemy.schema import FetchedValue
 from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.models.base import Base, GUID, TimestampMixin
 
 JSONType = JSONB().with_variant(JSON(), "sqlite")
+TSVectorType = TSVECTOR().with_variant(Text(), "sqlite")
 
 try:
     from pgvector.sqlalchemy import Vector
@@ -52,6 +54,19 @@ class KnowledgeDocument(Base, TimestampMixin):
     )
     source_url: Mapped[Optional[str]] = mapped_column(
         String(512),
+        nullable=True
+    )
+    source_id: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        index=True,
+        nullable=True
+    )
+    content_hash: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True
+    )
+    raw_content: Mapped[Optional[str]] = mapped_column(
+        Text,
         nullable=True
     )
     is_active: Mapped[bool] = mapped_column(
@@ -105,6 +120,16 @@ class DocumentChunk(Base):
     )
     embedding: Mapped[Any] = mapped_column(
         VectorColumn,
+        nullable=True
+    )
+    embedding_model: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        index=True,
+        nullable=True
+    )
+    tsv: Mapped[Optional[Any]] = mapped_column(
+        TSVectorType,
+        server_default=FetchedValue(),
         nullable=True
     )
     metadata_: Mapped[Dict[str, Any]] = mapped_column(

@@ -283,6 +283,7 @@ def generate_synthetic_payments():
 SAMPLE_DOCUMENTS = [
     {
         "title": "Visa Core Rules: Dispute Condition 10.4 (Card-Absent Fraud)",
+        "source_id": "internal://policies/visa-dispute-10-4",
         "doc_type": "scheme_rules",
         "version": "2026.1",
         "source_url": "https://usa.visa.com/content/dam/VCOM/download/about-visa/visa-rules-public.pdf",
@@ -308,6 +309,7 @@ SAMPLE_DOCUMENTS = [
     },
     {
         "title": "NACHA Operating Rules: ACH Return Reason Codes Guide",
+        "source_id": "internal://policies/nacha-ach-return-codes",
         "doc_type": "scheme_rules",
         "version": "2026.2",
         "source_url": "https://www.nacha.org/rules",
@@ -332,6 +334,7 @@ SAMPLE_DOCUMENTS = [
     },
     {
         "title": "Merchant Billing Policy: Authorization Holds and Duplicate Debits",
+        "source_id": "internal://policies/merchant-billing-duplicate-holds",
         "doc_type": "refund_policy",
         "version": "1.4",
         "source_url": "https://internal.payguard.ai/docs/merchant-billing-policy-v1.4.md",
@@ -356,6 +359,7 @@ SAMPLE_DOCUMENTS = [
     },
     {
         "title": "Platform Refund Lifecycle & Acquirer Reference Number (ARN) Guidelines",
+        "source_id": "internal://policies/refund-sla-arn-tracing",
         "doc_type": "sla_spec",
         "version": "2.0",
         "source_url": "https://internal.payguard.ai/docs/refund-sla-2.0.md",
@@ -458,18 +462,28 @@ async def seed_payments_and_events(session: AsyncSession) -> list[Payment]:
 
 async def seed_knowledge_documents(session: AsyncSession) -> list[KnowledgeDocument]:
     """Idempotently seed authoritative policy and troubleshooting documents."""
+    import hashlib
     results = []
     for doc_data in SAMPLE_DOCUMENTS:
-        stmt = select(KnowledgeDocument).where(KnowledgeDocument.title == doc_data["title"])
+        raw_text = "\n\n".join(c["content"] for c in doc_data["chunks"])
+        content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+
+        stmt = select(KnowledgeDocument).where(
+            (KnowledgeDocument.title == doc_data["title"])
+            | (KnowledgeDocument.source_id == doc_data.get("source_id"))
+        )
         existing = (await session.execute(stmt)).scalar_one_or_none()
         if not existing:
             doc_id = uuid.uuid4()
             doc = KnowledgeDocument(
                 id=doc_id,
                 title=doc_data["title"],
+                source_id=doc_data.get("source_id"),
                 doc_type=doc_data["doc_type"],
                 version=doc_data["version"],
                 source_url=doc_data["source_url"],
+                raw_content=raw_text,
+                content_hash=content_hash,
                 is_active=True,
             )
             session.add(doc)
@@ -484,10 +498,19 @@ async def seed_knowledge_documents(session: AsyncSession) -> list[KnowledgeDocum
                     content=chunk_data["content"],
                     token_count=len(chunk_data["content"].split()),
                     embedding=[0.025] * 1536,
-                    metadata_={"provenance": "official_scheme_manual", "version": doc_data["version"]},
+                    embedding_model="synthetic_placeholder",
+                    metadata_={
+                        "provenance": "official_scheme_manual",
+                        "version": doc_data["version"],
+                        "source_id": doc_data.get("source_id"),
+                    },
                 )
                 session.add(chunk)
         else:
+            if not existing.source_id and doc_data.get("source_id"):
+                existing.source_id = doc_data["source_id"]
+                existing.raw_content = raw_text
+                existing.content_hash = content_hash
             results.append(existing)
 
     await session.commit()

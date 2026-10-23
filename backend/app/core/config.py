@@ -1,6 +1,6 @@
 """Application configuration settings using pydantic-settings."""
 
-from typing import List, Union
+from typing import List, Optional, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -34,10 +34,18 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     MASK_PII_ENABLED: bool = True
 
-    # RAG & pgvector
+    # RAG & Embedding Settings (pgvector + Hybrid Search)
+    EMBEDDING_PROVIDER: str = "openai"
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIMENSION: int = 1536
-    RAG_TOP_K: int = 3
+    EMBEDDING_BATCH_SIZE: int = 32
+    EMBEDDING_TIMEOUT_SECONDS: float = 15.0
+    RAG_TOP_K: int = 5
+    RETRIEVAL_HYBRID_RRF_K: int = 60
+    RETRIEVAL_LEXICAL_WEIGHT: float = 1.0
+    RETRIEVAL_SEMANTIC_WEIGHT: float = 1.0
 
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [
