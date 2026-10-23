@@ -1,6 +1,8 @@
 """Payment service providing safe, read-only data access to transactions and event telemetry."""
 
-from typing import List, Optional
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
 import uuid
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,3 +105,65 @@ class PaymentService(IPaymentService):
             page=pagination.page,
             page_size=pagination.page_size,
         )
+
+    async def create_payment(
+        self,
+        payment_reference: str,
+        customer_id: str,
+        merchant_id: str,
+        amount: Decimal,
+        currency: str,
+        payment_method: str,
+        status: str,
+        gateway_name: str,
+        gateway_transaction_id: Optional[str] = None,
+        failure_code: Optional[str] = None,
+        failure_message: Optional[str] = None,
+        metadata_: Optional[Dict[str, Any]] = None,
+        authorized_at: Optional[datetime] = None,
+        captured_at: Optional[datetime] = None,
+    ) -> Payment:
+        payment = Payment(
+            id=uuid.uuid4(),
+            payment_reference=payment_reference,
+            customer_id=customer_id,
+            merchant_id=merchant_id,
+            amount=amount,
+            currency=currency.upper(),
+            payment_method=payment_method,
+            status=status,
+            gateway_name=gateway_name,
+            gateway_transaction_id=gateway_transaction_id,
+            failure_code=failure_code,
+            failure_message=failure_message,
+            metadata_=metadata_ or {},
+            authorized_at=authorized_at,
+            captured_at=captured_at,
+        )
+        self.session.add(payment)
+        await self.session.commit()
+        await self.session.refresh(payment)
+        return payment
+
+    async def create_payment_event(
+        self,
+        payment_id: uuid.UUID,
+        event_type: str,
+        to_status: str,
+        from_status: Optional[str] = None,
+        raw_payload: Optional[Dict[str, Any]] = None,
+        occurred_at: Optional[datetime] = None,
+    ) -> PaymentEvent:
+        event = PaymentEvent(
+            id=uuid.uuid4(),
+            payment_id=payment_id,
+            event_type=event_type,
+            from_status=from_status,
+            to_status=to_status,
+            raw_payload=raw_payload or {},
+            occurred_at=occurred_at or datetime.now(timezone.utc),
+        )
+        self.session.add(event)
+        await self.session.commit()
+        await self.session.refresh(event)
+        return event

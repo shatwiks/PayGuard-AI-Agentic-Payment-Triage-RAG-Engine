@@ -11,6 +11,8 @@ from backend.app.services.interfaces import (
     LLMInvestigationOutput,
 )
 from backend.app.services.payment import PaymentService
+from backend.app.services.user import UserService
+from backend.app.services.knowledge import KnowledgeService
 from backend.app.services.triage import TriageRulesEngine
 from backend.app.services.rag import RagService
 from backend.app.services.llm import LLMReasoningService
@@ -27,6 +29,8 @@ __all__ = [
     "TriageClassificationResult",
     "LLMInvestigationOutput",
     "PaymentService",
+    "UserService",
+    "KnowledgeService",
     "TriageRulesEngine",
     "RagService",
     "LLMReasoningService",

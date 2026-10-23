@@ -147,3 +147,14 @@ class IAuditService(ABC):
     ) -> None:
         """Persist structured audit record."""
         pass
+
+    @abstractmethod
+    async def get_audit_events(
+        self,
+        case_id: Optional[uuid.UUID] = None,
+        user_id: Optional[uuid.UUID] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Any]:
+        """Retrieve audit events filtered by case or user."""
+        pass

@@ -9,6 +9,7 @@ from backend.app.schemas.common import (
 )
 from backend.app.schemas.auth import (
     LoginRequest,
+    UserCreateRequest,
     TokenResponse,
     UserResponse,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "ErrorResponse",
     "HealthResponse",
     "LoginRequest",
+    "UserCreateRequest",
     "TokenResponse",
     "UserResponse",
     "PaymentEventResponse",

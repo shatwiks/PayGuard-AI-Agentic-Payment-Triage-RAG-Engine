@@ -127,3 +127,79 @@ async def test_investigation_creation_workflow(client: AsyncClient):
     )
     assert "recommended_action" in data["result"]
     assert "investigation_summary" in data["result"]
+
+
+@pytest.mark.asyncio
+async def test_payments_endpoints_flow(client: AsyncClient, db_session):
+    """Verify listing and detail retrieval of payments via API routes."""
+    from backend.app.services.payment import PaymentService
+
+    service = PaymentService(db_session)
+    payment = await service.create_payment(
+        payment_reference="tx_contract_test_001",
+        customer_id="cust_test_contract",
+        merchant_id="merch_test_contract",
+        amount=Decimal("89.95"),
+        currency="USD",
+        payment_method="credit_card",
+        status="captured",
+        gateway_name="stripe",
+    )
+
+    # 1. List payments with pagination and filter
+    list_resp = await client.get("/api/v1/payments?payment_reference=tx_contract_test_001")
+    assert list_resp.status_code == 200
+    list_data = list_resp.json()
+    assert list_data["total"] >= 1
+    assert any(p["payment_reference"] == "tx_contract_test_001" for p in list_data["items"])
+
+    # 2. Get payment details by ID
+    detail_resp = await client.get(f"/api/v1/payments/{payment.id}")
+    assert detail_resp.status_code == 200
+    detail_data = detail_resp.json()
+    assert detail_data["id"] == str(payment.id)
+    assert detail_data["payment_reference"] == "tx_contract_test_001"
+    assert Decimal(detail_data["amount"]) == Decimal("89.95")
+
+    # 3. Query non-existent payment ID -> 404 Not Found
+    random_id = uuid.uuid4()
+    not_found_resp = await client.get(f"/api/v1/payments/{random_id}")
+    assert not_found_resp.status_code == 404
+    err_data = not_found_resp.json()
+    assert err_data["error"]["code"] == "ENTITY_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_investigations_endpoints_flow(client: AsyncClient):
+    """Verify creating, listing, and retrieving investigations via API routes."""
+    # 1. Create case
+    create_payload = {
+        "customer_query": "Customer asking why transaction tx_investigate_001 has status pending for 3 days.",
+        "payment_reference": "tx_investigate_001",
+        "priority": "medium",
+    }
+    create_resp = await client.post("/api/v1/investigations", json=create_payload)
+    assert create_resp.status_code == 201
+    created_case = create_resp.json()
+    case_id = created_case["id"]
+
+    # 2. List investigations
+    list_resp = await client.get("/api/v1/investigations?page=1&page_size=10")
+    assert list_resp.status_code == 200
+    list_data = list_resp.json()
+    assert list_data["total"] >= 1
+    assert any(c["id"] == case_id for c in list_data["items"])
+
+    # 3. Retrieve single investigation case
+    get_resp = await client.get(f"/api/v1/investigations/{case_id}")
+    assert get_resp.status_code == 200
+    case_data = get_resp.json()
+    assert case_data["id"] == case_id
+    assert case_data["status"] == "triaged"
+    assert case_data["result"] is not None
+
+    # 4. Non-existent investigation case -> 404 Not Found
+    random_case_id = uuid.uuid4()
+    nf_resp = await client.get(f"/api/v1/investigations/{random_case_id}")
+    assert nf_resp.status_code == 404
+    assert nf_resp.json()["error"]["code"] == "ENTITY_NOT_FOUND"

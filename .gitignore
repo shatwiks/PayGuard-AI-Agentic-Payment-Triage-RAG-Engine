@@ -34,6 +34,7 @@ Thumbs.db
 # IDE & Testing
 .idea/
 .vscode/
+.serena/
 coverage/
 test-results/
 playwright-report/
