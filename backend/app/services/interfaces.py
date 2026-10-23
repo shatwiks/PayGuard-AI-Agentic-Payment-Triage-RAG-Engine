@@ -51,6 +51,10 @@ class LLMInvestigationOutput:
     human_review_required: bool = False
     human_review_reason: Optional[str] = None
     model_name: str = "gpt-4o-mini"
+    likely_cause: Optional[str] = None
+    generation_mode: str = "deterministic_fallback"
+    cited_chunks: List[PolicyCitation] = field(default_factory=list)
+
 
 
 class IPaymentService(ABC):
