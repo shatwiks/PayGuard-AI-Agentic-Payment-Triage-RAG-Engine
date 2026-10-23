@@ -1,5 +1,6 @@
 """Knowledge base retrieval and search API router."""
 
+import hashlib
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,11 +62,16 @@ async def ingest_policy_document(
         version=request.version,
         source_url=request.source_url,
     )
+    content_hash = (
+        result.document.content_hash
+        if result.document
+        else hashlib.sha256(request.raw_content.encode("utf-8")).hexdigest()
+    )
     return KnowledgeIngestResponse(
         document_id=result.document_id,
         source_id=result.source_id,
         title=result.title,
-        chunks_created=result.chunks_created,
-        content_hash=result.content_hash,
+        chunks_created=result.chunks_count,
+        content_hash=content_hash,
         status="ingested",
     )

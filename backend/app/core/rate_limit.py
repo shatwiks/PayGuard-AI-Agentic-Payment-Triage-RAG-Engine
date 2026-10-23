@@ -5,6 +5,7 @@ and uncontrolled API abuse.
 """
 
 from collections import defaultdict
+import threading
 import time
 from typing import Dict, List, Optional
 from fastapi import HTTPException, Request, status
@@ -13,11 +14,12 @@ from backend.app.core.config import settings
 
 
 class SlidingWindowRateLimiter:
-    """Thread-safe sliding-window in-memory rate limiter."""
+    """Thread-safe sliding-window in-memory rate limiter with stale key pruning."""
 
     def __init__(self):
         # Maps key -> list of timestamp floats
         self._timestamps: Dict[str, List[float]] = defaultdict(list)
+        self._lock = threading.Lock()
 
     def is_allowed(self, key: str, max_requests: int, window_seconds: int = 60) -> tuple[bool, int, int]:
         """Checks if a request under `key` is permitted.
@@ -28,26 +30,35 @@ class SlidingWindowRateLimiter:
         now = time.time()
         window_start = now - window_seconds
 
-        # Clean up timestamps older than window
-        timestamps = self._timestamps[key]
-        self._timestamps[key] = [t for t in timestamps if t > window_start]
+        with self._lock:
+            # Clean up timestamps older than window
+            timestamps = self._timestamps[key]
+            valid_timestamps = [t for t in timestamps if t > window_start]
 
-        current_count = len(self._timestamps[key])
+            if not valid_timestamps and key in self._timestamps:
+                # Prune dead key to prevent unbounded memory growth
+                self._timestamps.pop(key, None)
+                self._timestamps[key] = []
+            else:
+                self._timestamps[key] = valid_timestamps
 
-        if current_count >= max_requests:
-            # Earliest timestamp that will drop off
-            earliest = self._timestamps[key][0]
-            retry_after = max(1, int(window_seconds - (now - earliest)))
-            return False, 0, retry_after
+            current_count = len(self._timestamps[key])
 
-        # Record this request
-        self._timestamps[key].append(now)
-        remaining = max_requests - current_count - 1
-        return True, remaining, 0
+            if current_count >= max_requests:
+                # Earliest timestamp that will drop off
+                earliest = self._timestamps[key][0]
+                retry_after = max(1, int(window_seconds - (now - earliest)))
+                return False, 0, retry_after
+
+            # Record this request
+            self._timestamps[key].append(now)
+            remaining = max_requests - current_count - 1
+            return True, remaining, 0
 
     def reset(self):
         """Clears all tracked rate-limit keys (useful for unit testing)."""
-        self._timestamps.clear()
+        with self._lock:
+            self._timestamps.clear()
 
 
 limiter = SlidingWindowRateLimiter()

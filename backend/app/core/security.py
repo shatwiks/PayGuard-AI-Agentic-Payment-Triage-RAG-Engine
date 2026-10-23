@@ -111,6 +111,7 @@ PROMPT_INJECTION_PATTERNS = [
     re.compile(r"(?i)\b(?:system\s*(?:prompt|override|message)\s*:)"),
     re.compile(r"(?i)\b(?:output|reveal|show|print)\s+(?:the\s+)?system\s+prompt\b"),
     re.compile(r"(?i)\b(?:execute\s+sql|drop\s+table|grant\s+admin|bypass\s+auth)\b"),
+    re.compile(r"(?i)</?\s*(?:untrusted_[a-z_]+|system|instruction|prompt)\s*>"),
     re.compile(r"(?i)<\s*(?:script|iframe|object|embed)[^>]*>"),
 ]
 
