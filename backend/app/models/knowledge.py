@@ -48,6 +48,10 @@ class KnowledgeDocument(Base, TimestampMixin):
         index=True,
         nullable=False
     )  # scheme_rules, refund_policy, dispute_guide, sla_spec
+
+    @property
+    def source_type(self) -> str:
+        return self.doc_type
     version: Mapped[str] = mapped_column(
         String(32),
         nullable=False
@@ -149,3 +153,19 @@ class DocumentChunk(Base):
         "KnowledgeDocument",
         back_populates="chunks"
     )
+
+    def __init__(self, **kwargs: Any):
+        source_id = kwargs.pop("source_id", None)
+        if source_id:
+            meta = kwargs.setdefault("metadata_", {})
+            if isinstance(meta, dict):
+                meta.setdefault("source_id", source_id)
+        super().__init__(**kwargs)
+
+    @property
+    def source_id(self) -> Optional[str]:
+        if self.document and self.document.source_id:
+            return self.document.source_id
+        if self.metadata_ and isinstance(self.metadata_, dict):
+            return self.metadata_.get("source_id")
+        return None

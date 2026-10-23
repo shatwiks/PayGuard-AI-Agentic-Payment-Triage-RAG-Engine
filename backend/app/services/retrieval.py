@@ -1,7 +1,8 @@
 """Hybrid RAG Retrieval Engine combining PostgreSQL Full-Text Search and pgvector semantic search."""
 
 import logging
-from typing import Dict, List, Optional, Tuple
+import math
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 import uuid
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,47 @@ from backend.app.services.embedding import (
 )
 
 logger = logging.getLogger("payguard.retrieval")
+
+
+class LexicalSearchResult(NamedTuple):
+    chunk: DocumentChunk
+    rank: int
+    score: float
+
+    @property
+    def chunk_id(self) -> str:
+        return str(self.chunk.id)
+
+    @property
+    def text(self) -> str:
+        return self.chunk.content
+
+    @property
+    def title(self) -> str:
+        return self.chunk.document.title if self.chunk.document else ""
+
+
+class SemanticSearchResult(NamedTuple):
+    chunk: DocumentChunk
+    rank: int
+    distance: float
+    similarity: float
+
+    @property
+    def chunk_id(self) -> str:
+        return str(self.chunk.id)
+
+    @property
+    def text(self) -> str:
+        return self.chunk.content
+
+    @property
+    def embedding_model(self) -> Optional[str]:
+        return self.chunk.embedding_model
+
+    @property
+    def semantic_score(self) -> float:
+        return self.similarity
 
 
 class HybridRetrievalService:
@@ -49,48 +91,56 @@ class HybridRetrievalService:
 
     async def lexical_search(
         self,
-        query: str,
+        query: str = "",
+        query_text: Optional[str] = None,
         top_k: int = 10,
+        limit: Optional[int] = None,
         doc_type: Optional[str] = None,
-    ) -> List[Tuple[DocumentChunk, int, float]]:
+        source_type: Optional[str] = None,
+    ) -> List[LexicalSearchResult]:
         """Executes lexical search returning (chunk, rank, score). Uses PostgreSQL tsvector if available."""
-        cleaned_query = query.strip()
-        if not cleaned_query:
+        search_query = (query_text or query).strip()
+        eff_limit = limit or top_k
+        eff_doc_type = doc_type or source_type
+        if not search_query:
             return []
 
-        results: List[Tuple[DocumentChunk, int, float]] = []
+        results: List[LexicalSearchResult] = []
 
         if self._is_postgresql():
             # Native PostgreSQL Full-Text Search over generated tsvector column
             stmt = (
                 select(
                     DocumentChunk,
-                    func.ts_rank_cd(DocumentChunk.tsv, func.plainto_tsquery("english", cleaned_query)).label("score"),
+                    func.ts_rank_cd(DocumentChunk.tsv, func.plainto_tsquery("english", search_query)).label("score"),
                 )
                 .join(DocumentChunk.document)
                 .where(
                     KnowledgeDocument.is_active == True,  # noqa: E712
-                    DocumentChunk.tsv.op("@@")(func.plainto_tsquery("english", cleaned_query)),
+                    DocumentChunk.tsv.op("@@")(func.plainto_tsquery("english", search_query)),
                 )
                 .options(selectinload(DocumentChunk.document))
             )
-            if doc_type:
-                stmt = stmt.where(KnowledgeDocument.doc_type == doc_type)
+            if eff_doc_type:
+                stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
-            stmt = stmt.order_by(func.ts_rank_cd(DocumentChunk.tsv, func.plainto_tsquery("english", cleaned_query)).desc())
-            stmt = stmt.limit(top_k)
+            stmt = stmt.order_by(func.ts_rank_cd(DocumentChunk.tsv, func.plainto_tsquery("english", search_query)).desc())
+            stmt = stmt.limit(eff_limit)
 
             res = await self.session.execute(stmt)
             rows = res.all()
             for rank_idx, (chunk, score) in enumerate(rows, start=1):
-                results.append((chunk, rank_idx, float(score or 0.0)))
+                results.append(LexicalSearchResult(chunk, rank_idx, float(score or 0.0)))
         else:
             # Fallback for SQLite in-memory unit tests: word token match
-            terms = [w.lower() for w in cleaned_query.split() if len(w) > 1]
+            terms = [w.lower() for w in search_query.split() if len(w) >= 1]
             if not terms:
                 return []
 
-            or_conditions = []
+            or_conditions = [
+                DocumentChunk.content.ilike(f"%{search_query}%"),
+                DocumentChunk.section_header.ilike(f"%{search_query}%"),
+            ]
             for t in terms:
                 or_conditions.append(DocumentChunk.content.ilike(f"%{t}%"))
                 or_conditions.append(DocumentChunk.section_header.ilike(f"%{t}%"))
@@ -104,36 +154,47 @@ class HybridRetrievalService:
                 )
                 .options(selectinload(DocumentChunk.document))
             )
-            if doc_type:
-                stmt = stmt.where(KnowledgeDocument.doc_type == doc_type)
+            if eff_doc_type:
+                stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
-            stmt = stmt.limit(top_k)
+            stmt = stmt.limit(eff_limit * 2)
             res = await self.session.execute(stmt)
             chunks = res.scalars().all()
 
-            for rank_idx, chunk in enumerate(chunks, start=1):
-                # Basic token overlap heuristic score
+            scored = []
+            for chunk in chunks:
                 matches = sum(1 for t in terms if t in chunk.content.lower() or t in chunk.section_header.lower())
-                score = matches / len(terms)
-                results.append((chunk, rank_idx, score))
+                exact_boost = 1.0 if search_query.lower() in chunk.content.lower() else 0.0
+                score = (matches / len(terms)) + exact_boost
+                scored.append((chunk, score))
+
+            scored.sort(key=lambda x: x[1], reverse=True)
+            for rank_idx, (chunk, score) in enumerate(scored[:eff_limit], start=1):
+                results.append(LexicalSearchResult(chunk, rank_idx, score))
 
         return results
 
     async def semantic_search(
         self,
-        query: str,
+        query: str = "",
+        query_vector: Optional[List[float]] = None,
         top_k: int = 10,
+        limit: Optional[int] = None,
         doc_type: Optional[str] = None,
+        source_type: Optional[str] = None,
         min_similarity: Optional[float] = None,
-    ) -> List[Tuple[DocumentChunk, int, float, float]]:
+    ) -> List[SemanticSearchResult]:
         """Executes pgvector semantic search returning (chunk, rank, distance, similarity)."""
-        if not self.provider.is_available:
-            return []
-
-        query_vector = await self.provider.embed_query(query)
+        eff_limit = limit or top_k
+        eff_doc_type = doc_type or source_type
         target_model = self.provider.model_name
 
-        results: List[Tuple[DocumentChunk, int, float, float]] = []
+        if query_vector is None:
+            if not self.provider.is_available:
+                return []
+            query_vector = await self.provider.embed_query(query)
+
+        results: List[SemanticSearchResult] = []
 
         if self._is_postgresql():
             # PostgreSQL pgvector native cosine distance (<=>)
@@ -148,10 +209,10 @@ class HybridRetrievalService:
                 )
                 .options(selectinload(DocumentChunk.document))
             )
-            if doc_type:
-                stmt = stmt.where(KnowledgeDocument.doc_type == doc_type)
+            if eff_doc_type:
+                stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
-            stmt = stmt.order_by(distance_expr.asc()).limit(top_k)
+            stmt = stmt.order_by(distance_expr.asc()).limit(eff_limit)
             res = await self.session.execute(stmt)
             rows = res.all()
 
@@ -159,7 +220,7 @@ class HybridRetrievalService:
                 dist_val = float(distance or 0.0)
                 similarity = max(0.0, min(1.0, 1.0 - dist_val))
                 if min_similarity is None or similarity >= min_similarity:
-                    results.append((chunk, rank_idx, dist_val, similarity))
+                    results.append(SemanticSearchResult(chunk, rank_idx, dist_val, similarity))
         else:
             # Fallback for SQLite unit tests
             stmt = (
@@ -167,34 +228,70 @@ class HybridRetrievalService:
                 .join(DocumentChunk.document)
                 .where(
                     KnowledgeDocument.is_active == True,  # noqa: E712
+                    DocumentChunk.embedding_model == target_model,
                     DocumentChunk.embedding.isnot(None),
                 )
                 .options(selectinload(DocumentChunk.document))
-                .limit(top_k)
             )
-            if doc_type:
-                stmt = stmt.where(KnowledgeDocument.doc_type == doc_type)
+            if eff_doc_type:
+                stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
             res = await self.session.execute(stmt)
             chunks = res.scalars().all()
-            for rank_idx, chunk in enumerate(chunks, start=1):
-                # Placeholder distance 0.1 for SQLite mock tests
-                results.append((chunk, rank_idx, 0.10, 0.90))
+            scored: List[Tuple[DocumentChunk, float, float]] = []
+            for chunk in chunks:
+                vec = chunk.embedding
+                if not vec or len(vec) != len(query_vector):
+                    continue
+                dot = sum(a * b for a, b in zip(vec, query_vector))
+                norm_a = math.sqrt(sum(a * a for a in vec)) or 1.0
+                norm_b = math.sqrt(sum(b * b for b in query_vector)) or 1.0
+                sim = max(0.0, min(1.0, dot / (norm_a * norm_b)))
+                dist = max(0.0, 1.0 - sim)
+                if min_similarity is None or sim >= min_similarity:
+                    scored.append((chunk, dist, sim))
+            scored.sort(key=lambda x: x[1])
+            for rank_idx, (chunk, dist, sim) in enumerate(scored[:eff_limit], start=1):
+                results.append(SemanticSearchResult(chunk, rank_idx, dist, sim))
 
         return results
 
-    async def search(self, request: KnowledgeSearchRequest) -> KnowledgeSearchResponse:
+    async def search(
+        self,
+        request: Optional[Union[KnowledgeSearchRequest, str]] = None,
+        *,
+        query: Optional[str] = None,
+        top_k: int = 5,
+        retrieval_mode: str = "hybrid",
+        doc_type: Optional[str] = None,
+        source_type: Optional[str] = None,
+        min_score: Optional[float] = None,
+    ) -> KnowledgeSearchResponse:
         """Executes hybrid, lexical-only, or semantic-only retrieval with Reciprocal Rank Fusion."""
-        requested_mode = request.retrieval_mode
+        search_query = query or (request if isinstance(request, str) else None)
+        if isinstance(request, KnowledgeSearchRequest):
+            req_obj = request
+        elif search_query:
+            req_obj = KnowledgeSearchRequest(
+                query=search_query,
+                top_k=top_k,
+                retrieval_mode=retrieval_mode,
+                doc_type=doc_type or source_type,
+                min_score=min_score,
+            )
+        else:
+            raise ValueError("Query string or KnowledgeSearchRequest must be provided to search()")
+
+        requested_mode = req_obj.retrieval_mode
         candidate_map: Dict[uuid.UUID, Dict] = {}
 
         # 1. Lexical retrieval
         lexical_items = []
-        if requested_mode in ("hybrid", "lexical_only"):
+        if requested_mode in ("hybrid", "lexical", "lexical_only"):
             lexical_items = await self.lexical_search(
-                query=request.query,
-                top_k=request.top_k * 3,
-                doc_type=request.doc_type,
+                query=req_obj.query,
+                top_k=req_obj.top_k * 3,
+                doc_type=req_obj.doc_type,
             )
             for chunk, rank, score in lexical_items:
                 candidate_map[chunk.id] = {
@@ -218,9 +315,9 @@ class HybridRetrievalService:
         if requested_mode in ("hybrid", "semantic_only") and semantic_available:
             try:
                 semantic_items = await self.semantic_search(
-                    query=request.query,
-                    top_k=request.top_k * 3,
-                    doc_type=request.doc_type,
+                    query=req_obj.query,
+                    top_k=req_obj.top_k * 3,
+                    doc_type=req_obj.doc_type,
                 )
                 for chunk, rank, dist, sim in semantic_items:
                     if chunk.id in candidate_map:
@@ -243,13 +340,13 @@ class HybridRetrievalService:
 
         # Determine effective active retrieval mode
         if requested_mode == "hybrid" and not semantic_available:
-            effective_mode = "lexical_only"
+            effective_mode = "lexical"
         elif requested_mode == "semantic_only":
             effective_mode = "semantic_only"
-        elif requested_mode == "lexical_only":
-            effective_mode = "lexical_only"
+        elif requested_mode in ("lexical", "lexical_only"):
+            effective_mode = "lexical"
         else:
-            effective_mode = "hybrid" if semantic_items and lexical_items else ("semantic_only" if semantic_items else "lexical_only")
+            effective_mode = "hybrid" if semantic_items and lexical_items else ("semantic_only" if semantic_items else "lexical")
 
         # 3. Reciprocal Rank Fusion (RRF) calculation
         scored_candidates: List[SearchResultItem] = []
@@ -268,7 +365,7 @@ class HybridRetrievalService:
                 fusion_score += self.semantic_weight / (self.rrf_k + data["semantic_rank"])
 
             # Filter by min_score if requested
-            if request.min_score is not None and fusion_score < request.min_score:
+            if req_obj.min_score is not None and fusion_score < req_obj.min_score:
                 continue
 
             ranking_info = RankingDetails(
@@ -294,26 +391,28 @@ class HybridRetrievalService:
                     content=chunk.content,
                     token_count=chunk.token_count,
                     embedding_model=chunk.embedding_model,
+                    retrieval_mode=effective_mode,
                     ranking=ranking_info,
                 )
             )
 
         # 4. Sort descending by fusion score and take top_k
         scored_candidates.sort(key=lambda x: x.ranking.fusion_score, reverse=True)
-        top_results = scored_candidates[: request.top_k]
+        top_results = scored_candidates[: req_obj.top_k]
 
         return KnowledgeSearchResponse(
-            query=request.query,
+            query=req_obj.query,
             retrieval_mode=effective_mode,
             total_candidates=len(candidate_map),
             results_count=len(top_results),
             results=top_results,
         )
 
-    def to_citations(self, results: List[SearchResultItem]) -> List[PolicyCitation]:
+    def to_citations(self, results: Union[List[SearchResultItem], KnowledgeSearchResponse]) -> List[PolicyCitation]:
         """Maps search result passages to grounded policy citations for triage reasoning."""
+        items = results.results if isinstance(results, KnowledgeSearchResponse) else results
         citations = []
-        for r in results:
+        for r in items:
             citations.append(
                 PolicyCitation(
                     document_title=r.title,
