@@ -129,15 +129,31 @@ class LLMReasoningService(ILLMReasoningService):
             for c in citations
         ]) if citations else "No policy citations retrieved."
 
+        def _defuse_xml_delimiters(raw_text: str) -> str:
+            """Prevents untrusted user or citation content from breaking out of XML boundary tags."""
+            if not raw_text:
+                return raw_text
+            return (
+                raw_text.replace("</untrusted_customer_query>", "&lt;/untrusted_customer_query&gt;")
+                .replace("<untrusted_customer_query>", "&lt;untrusted_customer_query&gt;")
+                .replace("</untrusted_policy_citations>", "&lt;/untrusted_policy_citations&gt;")
+                .replace("<untrusted_policy_citations>", "&lt;untrusted_policy_citations&gt;")
+                .replace("</system>", "&lt;/system&gt;")
+                .replace("<system>", "&lt;system&gt;")
+            )
+
+        safe_user_query = _defuse_xml_delimiters(user_query)
+        safe_citations = _defuse_xml_delimiters(citations_text)
+
         user_content = (
-            f"<untrusted_customer_query>\n{user_query}\n</untrusted_customer_query>\n\n"
+            f"<untrusted_customer_query>\n{safe_user_query}\n</untrusted_customer_query>\n\n"
             f"VERIFIED PAYMENT DATA:\n{payment_summary}\n\n"
             f"EVENT TIMELINE:\n{events_summary}\n\n"
             f"DETERMINISTIC TRIAGE CLASSIFICATION:\n"
             f"Category: {triage_result.category}, Rule: {triage_result.rule_id_matched}, "
             f"Confidence: {triage_result.confidence_score}, "
             f"Conflicts: {', '.join(triage_result.conflicting_evidence) or 'None'}\n\n"
-            f"<untrusted_policy_citations>\n{citations_text}\n</untrusted_policy_citations>\n\n"
+            f"<untrusted_policy_citations>\n{safe_citations}\n</untrusted_policy_citations>\n\n"
             f"Return JSON with keys: 'investigation_summary', 'likely_cause', 'recommended_action', "
             f"'recommended_action_details', 'missing_or_conflicting_info' (list of strings), "
             f"'human_review_required' (boolean), 'human_review_reason' (string or null)."

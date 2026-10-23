@@ -25,6 +25,7 @@ from sqlalchemy import select
 from backend.app.core.config import settings
 from backend.app.core.security import mask_pii, sanitize_prompt_input
 from backend.app.models.investigation import InvestigationCase, InvestigationResult
+from backend.app.models.payment import Payment
 from backend.app.schemas.auth import UserResponse
 from backend.app.schemas.investigation import (
     InvestigationCaseResponse,
@@ -94,37 +95,6 @@ class OrchestrationService(IOrchestrationService):
     ) -> InvestigationCaseResponse:
         start_time = time.perf_counter()
 
-        # Idempotency Check: prevent duplicate writes on quick retries
-        if request.payment_id or request.payment_reference:
-            cutoff = datetime.now(timezone.utc) - timedelta(
-                seconds=settings.INVESTIGATION_IDEMPOTENCY_WINDOW_SECONDS
-            )
-            idempotency_conditions = [
-                InvestigationCase.customer_query == request.customer_query,
-                InvestigationCase.created_at >= cutoff,
-            ]
-            if request.payment_id:
-                idempotency_conditions.append(InvestigationCase.payment_id == request.payment_id)
-
-            existing_stmt = (
-                select(InvestigationCase)
-                .where(*idempotency_conditions)
-                .options(
-                    selectinload(InvestigationCase.payment),
-                    selectinload(InvestigationCase.result),
-                )
-                .order_by(InvestigationCase.created_at.desc())
-                .limit(1)
-            )
-            existing_res = await self.session.execute(existing_stmt)
-            existing_case = existing_res.scalar_one_or_none()
-            if existing_case:
-                logger.info(
-                    "Idempotency hit: returning existing recent case %s for query",
-                    existing_case.id,
-                )
-                return InvestigationCaseResponse.model_validate(existing_case)
-
         # Stage 1: Validate and mask PII in customer query
         sanitized_query = mask_pii(request.customer_query)
         clean_query, injection_detected = sanitize_prompt_input(sanitized_query)
@@ -138,6 +108,53 @@ class OrchestrationService(IOrchestrationService):
             payment_id=request.payment_id,
             payment_reference=request.payment_reference,
         )
+        resolved_payment_id = payment_lookup.payment_id if payment_lookup.found else None
+
+        # Idempotency Check: prevent duplicate writes, RAG retrieval, and LLM reasoning on quick retries
+        if request.payment_id or request.payment_reference:
+            cutoff = datetime.now(timezone.utc) - timedelta(
+                seconds=settings.INVESTIGATION_IDEMPOTENCY_WINDOW_SECONDS
+            )
+            idempotency_conditions = [
+                InvestigationCase.customer_query == request.customer_query,
+                InvestigationCase.created_at >= cutoff,
+            ]
+            # Scope to the same authenticated user or unassigned state to prevent cross-user IDOR/collisions
+            if current_user:
+                idempotency_conditions.append(InvestigationCase.created_by_user_id == current_user.id)
+            else:
+                idempotency_conditions.append(InvestigationCase.created_by_user_id.is_(None))
+
+            if resolved_payment_id:
+                idempotency_conditions.append(InvestigationCase.payment_id == resolved_payment_id)
+            else:
+                idempotency_conditions.append(InvestigationCase.payment_id.is_(None))
+
+            existing_stmt = (
+                select(InvestigationCase)
+                .where(*idempotency_conditions)
+                .options(
+                    selectinload(InvestigationCase.payment),
+                    selectinload(InvestigationCase.result),
+                )
+                .order_by(InvestigationCase.created_at.desc())
+                .limit(1)
+            )
+            existing_res = await self.session.execute(existing_stmt)
+            existing_case = existing_res.scalar_one_or_none()
+            if existing_case and existing_case.result is not None:
+                # Verify that payment reference matches if one was requested
+                existing_ref = (
+                    existing_case.payment.payment_reference
+                    if existing_case.payment
+                    else (existing_case.result.evidence_package or {}).get("payment_reference")
+                )
+                if not (request.payment_reference and existing_ref and existing_ref != request.payment_reference):
+                    logger.info(
+                        "Idempotency hit: returning existing recent completed case %s for query",
+                        existing_case.id,
+                    )
+                    return InvestigationCaseResponse.model_validate(existing_case)
 
         # Stage 3: Deterministic payment triage evaluation
         self.tool_registry.validate_tool_name("payment_triage")
@@ -176,6 +193,7 @@ class OrchestrationService(IOrchestrationService):
         }
 
         # Stage 6 & 7: Generate grounded synthesis and strictly validate citations
+        self.tool_registry.validate_tool_name("investigation_explanation")
         explanation_result = await self.explanation_tool.execute(
             user_query=sanitized_query,
             payment_lookup=payment_lookup,
@@ -232,6 +250,7 @@ class OrchestrationService(IOrchestrationService):
             raise exc
 
         # Stage 9: Record immutable operational audit event
+        self.tool_registry.validate_tool_name("audit")
         await self.audit_tool.execute(
             action="investigation_completed",
             resource_type="investigation_case",
