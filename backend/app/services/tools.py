@@ -371,3 +371,36 @@ class AuditTool:
             details=sanitized_details,
             ip_address=ip_address,
         )
+
+
+class ToolRegistry:
+    """Explicit, bounded registry for authorized investigation tools.
+    Rejects unauthorized, dynamic, or unsupported tool calls to prevent arbitrary execution.
+    """
+    ALLOWED_TOOLS = {
+        "payment_lookup",
+        "payment_triage",
+        "knowledge_retrieval",
+        "investigation_explanation",
+        "audit",
+    }
+
+    def __init__(
+        self,
+        payment_lookup: PaymentLookupTool,
+        payment_triage: PaymentTriageTool,
+        knowledge_retrieval: KnowledgeRetrievalTool,
+        explanation: InvestigationExplanationTool,
+        audit: AuditTool,
+    ):
+        self.payment_lookup = payment_lookup
+        self.payment_triage = payment_triage
+        self.knowledge_retrieval = knowledge_retrieval
+        self.explanation = explanation
+        self.audit = audit
+
+    def validate_tool_name(self, tool_name: str) -> None:
+        """Validates that a tool name is strictly within the allowed whitelist."""
+        if tool_name not in self.ALLOWED_TOOLS:
+            raise ValueError(f"Unauthorized or unsupported tool invocation attempted: '{tool_name}'")
+
