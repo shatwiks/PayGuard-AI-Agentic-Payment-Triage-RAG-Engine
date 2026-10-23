@@ -176,20 +176,40 @@ async def get_optional_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> Optional[User]:
-    """FastAPI dependency to optionally extract user if Bearer token is provided."""
+    """FastAPI dependency to optionally extract user if Bearer token is provided.
+    If credentials are provided but invalid or expired, raises 401 Unauthorized.
+    """
     if not credentials or not credentials.credentials:
         return None
     payload = decode_access_token(credentials.credentials)
     if not payload or "sub" not in payload:
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired access token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         user_uuid = uuid.UUID(payload["sub"])
     except (ValueError, TypeError):
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Malformed user identifier in token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     stmt = select(User).where(User.id == user_uuid)
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
-    if not user or not user.is_active:
-        return None
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated user record not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Inactive user account",
+        )
     return user
+
