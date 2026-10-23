@@ -150,7 +150,8 @@ class OrchestrationService(IOrchestrationService):
             priority=request.priority or "medium",
         )
 
-        validated_citations_data = [c.model_dump() for c in explanation_result.validated_citations]
+        validated_citations_data = [c.model_dump(mode="json") for c in explanation_result.validated_citations]
+
 
         db_result = InvestigationResult(
             id=uuid.uuid4(),
