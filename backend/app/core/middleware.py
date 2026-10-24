@@ -67,5 +67,13 @@ class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
                         },
                     )
             except ValueError:
-                pass
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "code": "BAD_REQUEST",
+                            "message": "Invalid Content-Length header.",
+                        }
+                    },
+                )
         return await call_next(request)
