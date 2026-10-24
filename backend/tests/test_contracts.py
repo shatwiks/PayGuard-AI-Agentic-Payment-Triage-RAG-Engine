@@ -248,3 +248,14 @@ async def test_investigations_metrics_endpoint(client: AsyncClient):
     assert isinstance(data["total_cases"], int)
     assert isinstance(data["by_category"], dict)
 
+
+def test_settings_cors_origin_parsing():
+    """Verify Settings correctly parses comma-separated string origins into a list."""
+    from backend.app.core.config import Settings
+
+    s = Settings(BACKEND_CORS_ORIGINS="http://localhost:3000, http://localhost:3001, https://payguard.ai")
+    assert s.BACKEND_CORS_ORIGINS == ["http://localhost:3000", "http://localhost:3001", "https://payguard.ai"]
+
+    s2 = Settings(BACKEND_CORS_ORIGINS=["https://app.payguard.ai"])
+    assert s2.BACKEND_CORS_ORIGINS == ["https://app.payguard.ai"]
+
