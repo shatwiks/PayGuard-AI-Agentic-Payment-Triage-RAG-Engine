@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payguard_secure_password}
       POSTGRES_DB: ${POSTGRES_DB:-payguard_db}
     ports:
-      - "${POSTGRES_PORT:-5434}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5434}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -17,7 +17,72 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - payguard_network
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: payguard_backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DEBUG: ${DEBUG:-false}
+      POSTGRES_USER: ${POSTGRES_USER:-payguard_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payguard_secure_password}
+      POSTGRES_DB: ${POSTGRES_DB:-payguard_db}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payguard_user}:${POSTGRES_PASSWORD:-payguard_secure_password}@db:5432/${POSTGRES_DB:-payguard_db}
+      SECRET_KEY: ${SECRET_KEY:-dev_secret_key_change_in_production_8f7b2a9e1d4c5e6f}
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      RATE_LIMIT_ENABLED: "true"
+      MASK_PII_ENABLED: "true"
+      PROMPT_INJECTION_DEFENSE_ENABLED: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+    networks:
+      - payguard_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+    container_name: payguard_frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    ports:
+      - "${FRONTEND_PORT:-3001}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - payguard_network
 
 volumes:
   postgres_data:
     driver: local
+
+networks:
+  payguard_network:
+    driver: bridge
