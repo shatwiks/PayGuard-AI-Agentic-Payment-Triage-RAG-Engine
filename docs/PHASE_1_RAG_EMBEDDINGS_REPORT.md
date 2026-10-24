@@ -183,3 +183,55 @@ Execution Time: 1.151 ms
    - For larger knowledge bases (thousands of chunks), the `--batch-size` flag allows tuning throughput against OpenAI rate limits (e.g. `--batch-size 64` or `128`).
 3. **Phase 2 Roadmap: Advanced RAG Evaluation:**
    - Evaluate Mean Reciprocal Rank (MRR), Precision@K, and Recall@K against real policy search queries with live embeddings.
+
+---
+
+## 9. Phase 1.5 Verification: Real Embeddings Audit & Execution Evidence
+
+### 1. Environment Credential Audit
+A runtime audit of environment variables and `.env` was conducted:
+- `OPENAI_API_KEY`: **Not configured / blank**
+- `GEMINI_API_KEY`: **Not configured / blank**
+
+In accordance with strict production requirements, secrets are never fabricated or mocked as real external API runs.
+
+### 2. Live Re-Embedding Command Execution
+The real CLI entry point was executed against the active PostgreSQL database:
+```bash
+python -m backend.app.scripts.seed_data --reembed-live
+```
+**Execution Telemetry:**
+```
+[INFO] Re-embedding workflow initiated with provider model: text-embedding-3-small
+[INFO] SELECT count(document_chunks.id) AS count_1 FROM document_chunks
+[WARNING] Embedding provider 'text-embedding-3-small' credentials unavailable (OPENAI_API_KEY missing or placeholder). Live semantic embeddings remain unverified. Existing chunks were not modified.
+
+=== PAYGUARD RAG RE-EMBEDDING REPORT ===
+Status:             unverified_provider_unavailable
+Provider:           text-embedding-3-small
+Provider Available: False
+Total Chunks:       10
+Eligible Chunks:    0
+Re-embedded:        0
+Skipped:            10
+Failed:             0
+Message:            Embedding provider 'text-embedding-3-small' credentials unavailable (OPENAI_API_KEY missing or placeholder). Live semantic embeddings remain unverified. Existing chunks were not modified.
+=========================================
+```
+- **Exit Code:** `0` (clean non-crashing exit)
+- **Data Protection:** Chunks were **not** replaced with corrupt data or placeholder vectors.
+
+### 3. PostgreSQL Database Chunk State Inspection
+Direct inspection of PostgreSQL table `document_chunks`:
+- **Total Documents:** 5
+- **Total Chunks:** 10
+- **Stored Model Tag:** `synthetic_placeholder` (retained safely from initial seed)
+- **Exclusion Verification:** Confirmed that `HybridRetrievalService.semantic_search` rejects queries against `synthetic_placeholder` chunks and routes queries to lexical FTS.
+
+### 4. Retained Limitation Summary
+Until a valid `OPENAI_API_KEY` is provided in `.env`:
+- Live semantic vectors cannot be generated from OpenAI.
+- Semantic search will exclude existing placeholder vectors.
+- Hybrid search functions via lexical full-text search (tsvector + GIN).
+- Development and local testing continue with full pass coverage (139/139 tests).
+
