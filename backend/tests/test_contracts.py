@@ -259,3 +259,56 @@ def test_settings_cors_origin_parsing():
     s2 = Settings(BACKEND_CORS_ORIGINS=["https://app.payguard.ai"])
     assert s2.BACKEND_CORS_ORIGINS == ["https://app.payguard.ai"]
 
+
+def test_settings_staging_production_validation():
+    """Verify Settings rejects insecure defaults in staging/production and accepts valid configurations."""
+    import pytest
+    from backend.app.core.config import Settings
+
+    # 1. Reject default dev secret key in staging
+    with pytest.raises(ValueError, match="Insecure or missing SECRET_KEY"):
+        Settings(
+            APP_ENV="staging",
+            SECRET_KEY="dev_secret_key_change_in_production_8f7b2a9e1d4c5e6f",
+            DATABASE_URL="postgresql+asyncpg://u:p@localhost:5432/db",
+            DEBUG=False,
+        )
+
+    # 2. Reject short secret key (<32 chars)
+    with pytest.raises(ValueError, match="Insecure or missing SECRET_KEY"):
+        Settings(
+            APP_ENV="production",
+            SECRET_KEY="short_secret",
+            DATABASE_URL="postgresql+asyncpg://u:p@localhost:5432/db",
+            DEBUG=False,
+        )
+
+    # 3. Reject DEBUG=True in production
+    with pytest.raises(ValueError, match="DEBUG cannot be True"):
+        Settings(
+            APP_ENV="production",
+            SECRET_KEY="a" * 32,
+            DATABASE_URL="postgresql+asyncpg://u:p@localhost:5432/db",
+            DEBUG=True,
+        )
+
+    # 4. Reject SQLite in staging
+    with pytest.raises(ValueError, match="SQLite database is not permitted"):
+        Settings(
+            APP_ENV="staging",
+            SECRET_KEY="a" * 32,
+            DATABASE_URL="sqlite+aiosqlite:///./test.db",
+            DEBUG=False,
+        )
+
+    # 5. Accept compliant staging configuration
+    valid_staging = Settings(
+        APP_ENV="staging",
+        SECRET_KEY="staging_secret_key_random_hex_32_bytes_safe",
+        DATABASE_URL="postgresql+asyncpg://u:p@localhost:5432/db",
+        DEBUG=False,
+    )
+    assert valid_staging.APP_ENV == "staging"
+    assert valid_staging.DEBUG is False
+
+

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import logging
 import sys
+from typing import List, Optional
 import uuid
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -1,7 +1,7 @@
 """Application configuration settings using pydantic-settings."""
 
 from typing import List, Optional, Union
-from pydantic import AnyHttpUrl, field_validator
+from pydantic import AnyHttpUrl, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -58,21 +58,48 @@ class Settings(BaseSettings):
 
     # CORS
 
-    BACKEND_CORS_ORIGINS: List[str] = [
+    BACKEND_CORS_ORIGINS: Union[str, List[str]] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3001",
     ]
 
-    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
+    @field_validator("BACKEND_CORS_ORIGINS", mode="after")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
-            return v
+        if isinstance(v, str):
+            if v.startswith("[") and v.endswith("]"):
+                import json
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
+            return [i.strip() for i in v.split(",") if i.strip()]
+        elif isinstance(v, list):
+            return [str(i).strip() for i in v]
         raise ValueError(v)
+
+    @model_validator(mode="after")
+    def validate_production_and_staging_settings(self) -> "Settings":
+        env = (self.APP_ENV or "").lower()
+        if env in ("production", "staging"):
+            insecure_secret = "dev_secret_key_change_in_production_8f7b2a9e1d4c5e6f"
+            if not self.SECRET_KEY or self.SECRET_KEY == insecure_secret or len(self.SECRET_KEY) < 32:
+                raise ValueError(
+                    f"Insecure or missing SECRET_KEY in '{self.APP_ENV}' environment! "
+                    "SECRET_KEY must not use default development values and must be at least 32 characters long."
+                )
+            if self.DEBUG:
+                raise ValueError(
+                    f"DEBUG cannot be True in '{self.APP_ENV}' environment."
+                )
+            if "sqlite" in self.DATABASE_URL.lower():
+                raise ValueError(
+                    f"SQLite database is not permitted in '{self.APP_ENV}' environment. "
+                    "A production-grade PostgreSQL database with pgvector is required."
+                )
+        return self
 
 
 settings = Settings()
