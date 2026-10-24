@@ -10,6 +10,7 @@ from backend.app.models.base import Base, GUID, TimestampMixin
 if TYPE_CHECKING:
     from backend.app.models.investigation import InvestigationCase
     from backend.app.models.audit import AuditEvent
+    from backend.app.models.knowledge import KnowledgeDocument
 
 
 class User(Base, TimestampMixin):
@@ -60,5 +61,11 @@ class User(Base, TimestampMixin):
     audit_events: Mapped[List["AuditEvent"]] = relationship(
         "AuditEvent",
         back_populates="user",
+        lazy="selectin"
+    )
+    uploaded_documents: Mapped[List["KnowledgeDocument"]] = relationship(
+        "KnowledgeDocument",
+        foreign_keys="KnowledgeDocument.uploaded_by_id",
+        back_populates="uploaded_by",
         lazy="selectin"
     )

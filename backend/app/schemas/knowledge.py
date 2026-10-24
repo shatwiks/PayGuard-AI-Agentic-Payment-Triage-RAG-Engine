@@ -1,5 +1,4 @@
-"""Schemas for knowledge base hybrid search, document retrieval, and citation tracking."""
-
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -16,7 +15,7 @@ class KnowledgeSearchRequest(BaseModel):
     )
     doc_type: Optional[str] = Field(
         default=None,
-        description="Filter by document type (e.g. scheme_rules, refund_policy, dispute_guide, sla_spec)",
+        description="Filter by document type (e.g. scheme_rules, refund_policy, dispute_guide, sla_spec, user_upload)",
     )
     min_score: Optional[float] = Field(
         default=None,
@@ -35,6 +34,14 @@ class KnowledgeSearchRequest(BaseModel):
     include_parent_context: bool = Field(
         default=True,
         description="Whether to fetch and attach surrounding parent chunk context for retrieved child chunks",
+    )
+    document_ids: Optional[List[uuid.UUID]] = Field(
+        default=None,
+        description="Optional list of document UUIDs to restrict search scope",
+    )
+    scope: str = Field(
+        default="all",
+        description="Search scope: 'all', 'uploaded', or 'knowledge_base'",
     )
 
 
@@ -121,4 +128,84 @@ class KnowledgeIngestResponse(BaseModel):
     chunks_created: int
     content_hash: str
     status: str
+
+
+class UserDocumentSummary(BaseModel):
+    """Metadata summary for user-uploaded or system knowledge documents."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    title: str
+    file_name: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    mime_type: Optional[str] = None
+    doc_type: str
+    version: str
+    content_hash: Optional[str] = None
+    is_system: bool
+    processing_status: str
+    embedding_status: str
+    page_count: Optional[int] = None
+    chunk_count: int
+    uploaded_by_id: Optional[uuid.UUID] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserDocumentDetail(UserDocumentSummary):
+    """Detailed view of a document including error messages and preview."""
+    error_message: Optional[str] = None
+    raw_content_preview: Optional[str] = None
+
+
+class DocumentUploadResponse(BaseModel):
+    """Response returned upon uploading a document."""
+    model_config = ConfigDict(from_attributes=True)
+
+    document_id: uuid.UUID
+    id: Optional[uuid.UUID] = None
+    title: str
+    file_name: str
+    file_size_bytes: int
+    chunks_created: int
+    chunk_count: Optional[int] = None
+    page_count: Optional[int] = None
+    processing_status: str
+    embedding_status: str
+    is_duplicate: bool = False
+    message: str
+
+
+class DocumentAskRequest(BaseModel):
+    """Request to ask a question grounded strictly in selected or authorized documents."""
+    query: str = Field(min_length=2, max_length=1000, description="Question to answer using document evidence")
+    document_ids: Optional[List[uuid.UUID]] = Field(default=None, description="Optional document IDs to restrict search scope")
+    scope: str = Field(default="uploaded", description="Scope: 'uploaded', 'knowledge_base', or 'all'")
+    top_k: int = Field(default=5, ge=1, le=20, description="Maximum number of evidence excerpts to retrieve")
+    retrieval_mode: str = Field(default="hybrid", pattern="^(hybrid|semantic_only|lexical_only)$")
+
+
+class CitedExcerptItem(BaseModel):
+    """Specific passage excerpt with exact document, section, and page provenance."""
+    document_id: uuid.UUID
+    document_title: str
+    chunk_id: Optional[uuid.UUID] = None
+    section_title: Optional[str] = None
+    page_number: Optional[int] = None
+    excerpt: str
+    score: float
+
+
+class DocumentAskResponse(BaseModel):
+    """Evidence-grounded answer to a user question regarding documents."""
+    query: str
+    answer: str
+    has_sufficient_evidence: bool
+    is_grounded: bool = False
+    cited_excerpts: List[CitedExcerptItem] = Field(default_factory=list)
+    citations: List[Dict[str, Any]] = Field(default_factory=list)
+    retrieval_mode_used: str
+    embedding_status: str
+    scope_used: str
+
 

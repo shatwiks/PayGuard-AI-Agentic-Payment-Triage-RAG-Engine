@@ -2,7 +2,10 @@
 
 from datetime import datetime
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.app.models.user import User
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -33,6 +36,11 @@ except ImportError:
 class KnowledgeDocument(Base, TimestampMixin):
     """Authoritative compliance, dispute, and troubleshooting document."""
     __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        Index("idx_docs_uploaded_by_active", "uploaded_by_id", "is_active"),
+        Index("idx_docs_is_system_active", "is_system", "is_active"),
+        Index("idx_docs_content_hash_user", "content_hash", "uploaded_by_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         GUID,
@@ -47,7 +55,7 @@ class KnowledgeDocument(Base, TimestampMixin):
         String(64),
         index=True,
         nullable=False
-    )  # scheme_rules, refund_policy, dispute_guide, sla_spec
+    )  # scheme_rules, refund_policy, dispute_guide, sla_spec, user_upload
 
     @property
     def source_type(self) -> str:
@@ -67,6 +75,7 @@ class KnowledgeDocument(Base, TimestampMixin):
     )
     content_hash: Mapped[Optional[str]] = mapped_column(
         String(64),
+        index=True,
         nullable=True
     )
     raw_content: Mapped[Optional[str]] = mapped_column(
@@ -79,12 +88,70 @@ class KnowledgeDocument(Base, TimestampMixin):
         nullable=False
     )
 
-    # Relationship
+    # User Upload & Access Isolation Fields
+    uploaded_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True
+    )
+    is_system: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        index=True,
+        nullable=False
+    )
+    file_name: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True
+    )
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True
+    )
+    mime_type: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        nullable=True
+    )
+    storage_path: Mapped[Optional[str]] = mapped_column(
+        String(512),
+        nullable=True
+    )
+    processing_status: Mapped[str] = mapped_column(
+        String(32),
+        default="pending",
+        index=True,
+        nullable=False
+    )  # pending, processing, completed, failed
+    embedding_status: Mapped[str] = mapped_column(
+        String(32),
+        default="pending",
+        nullable=False
+    )  # completed, lexical_only, failed, pending
+    error_message: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True
+    )
+    page_count: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True
+    )
+    chunk_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False
+    )
+
+    # Relationships
     chunks: Mapped[List["DocumentChunk"]] = relationship(
         "DocumentChunk",
         back_populates="document",
         cascade="all, delete-orphan",
         order_by="DocumentChunk.chunk_index"
+    )
+    uploaded_by: Mapped[Optional["User"]] = relationship(
+        "User",
+        foreign_keys=[uploaded_by_id]
     )
 
 

@@ -22,6 +22,9 @@ class TextChunk(BaseModel):
     content_hash: Optional[str] = Field(default=None, description="SHA-256 hash of chunk content")
 
 
+HierarchicalChunk = TextChunk
+
+
 class HierarchicalChunkResult(BaseModel):
     """Container for parent chunks, child chunks, and combined chunk collection."""
     parents: List[TextChunk] = Field(default_factory=list, description="Coarse parent chunks for surrounding context")

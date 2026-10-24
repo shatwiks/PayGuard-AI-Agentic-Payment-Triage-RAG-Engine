@@ -191,3 +191,74 @@ export interface ApiErrorEnvelope {
   };
   timestamp: string;
 }
+
+export interface UserDocumentSummary {
+  id: string;
+  title: string;
+  file_name: string | null;
+  file_size_bytes: number | null;
+  mime_type: string | null;
+  doc_type: string;
+  version: string;
+  content_hash: string | null;
+  is_system: boolean;
+  processing_status: string;
+  embedding_status: string;
+  page_count: number | null;
+  chunk_count: number;
+  uploaded_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UserDocumentDetail extends UserDocumentSummary {
+  error_message: string | null;
+  raw_content_preview: string | null;
+}
+
+export interface DocumentUploadResponse {
+  document_id: string;
+  id?: string;
+  title: string;
+  file_name: string;
+  file_size_bytes: number;
+  chunks_created: number;
+  chunk_count?: number;
+  page_count: number | null;
+  processing_status: string;
+  embedding_status: string;
+  is_duplicate: boolean;
+  message: string;
+}
+
+export interface CitedExcerptItem {
+  document_id: string;
+  document_title: string;
+  chunk_id: string | null;
+  section_title: string | null;
+  page_number: number | null;
+  excerpt: string;
+  score: number;
+}
+
+export interface DocumentCitation {
+  document_id: string;
+  document_name: string;
+  chunk_id: string;
+  section: string;
+  page: number | null;
+  excerpt: string;
+}
+
+export interface DocumentAskResponse {
+  query: string;
+  answer: string;
+  has_sufficient_evidence: boolean;
+  is_grounded: boolean;
+  cited_excerpts: CitedExcerptItem[];
+  citations: DocumentCitation[];
+  retrieval_mode_used: string;
+  embedding_status: string;
+  scope_used: string;
+}
+
