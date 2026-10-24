@@ -10,6 +10,7 @@ from backend.app.services.embedding import (
     EmbeddingValidationException,
     IEmbeddingProvider,
     MockEmbeddingProvider,
+    OllamaEmbeddingProvider,
     OpenAIEmbeddingProvider,
     get_embedding_provider,
 )
@@ -204,3 +205,30 @@ def test_get_embedding_provider_factory():
     with patch("backend.app.services.embedding.settings.EMBEDDING_PROVIDER", "openai"):
         p_openai = get_embedding_provider()
         assert isinstance(p_openai, OpenAIEmbeddingProvider)
+
+    with patch("backend.app.services.embedding.settings.EMBEDDING_PROVIDER", "ollama"):
+        p_ollama = get_embedding_provider()
+        assert isinstance(p_ollama, OllamaEmbeddingProvider)
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_dimension_padding():
+    provider = OllamaEmbeddingProvider(
+        base_url="http://127.0.0.1:11434",
+        model="nomic-embed-text",
+        dimension=1536,
+    )
+    assert provider.model_name == "nomic-embed-text"
+    assert provider.dimension == 1536
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    # Simulate a 768-dim vector from nomic-embed-text
+    mock_resp.json.return_value = {"embedding": [0.01] * 768}
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient.post", return_value=mock_resp):
+        vec = await provider.embed_query("test text")
+        assert len(vec) == 1536
+        assert vec[:768] == [0.01] * 768
+        assert vec[768:] == [0.0] * 768

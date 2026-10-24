@@ -10,6 +10,8 @@ os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["SECRET_KEY"] = "test_super_secret_key_for_unit_tests_32chars"
 os.environ["MASK_PII_ENABLED"] = "true"
+os.environ["EMBEDDING_PROVIDER"] = "openai"
+os.environ["OPENAI_API_KEY"] = ""
 
 from backend.app.core.database import get_db
 from backend.app.main import app

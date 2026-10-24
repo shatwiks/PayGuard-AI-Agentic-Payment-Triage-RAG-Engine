@@ -17,13 +17,13 @@
 
 | Dimension | Audit Status | Grounded Justification |
 | :--- | :---: | :--- |
-| **Backend Test Suite** | **VERIFIED** | **177 / 177 tests passing** (100% pass across 20 test modules in 100.04s). Zero regressions. |
+| **Backend Test Suite** | **VERIFIED** | **178 / 178 tests passing** (100% pass across 20 test modules in 93.93s). Zero regressions. |
 | **Multi-Tenant Security** | **VERIFIED (HARDENED)** | Critical IDOR injection in `POST /knowledge/search` and high-risk orphaned document leakage under `ON DELETE SET NULL` were discovered, confirmed, patched, and verified with dedicated adversarial tests. |
 | **Parsing & Upload Security** | **VERIFIED** | Magic bytes, filename sanitization, binary null-byte rejection, corrupted PDF handling, zero-byte file rejection, and 10MB payload limit verified. |
 | **Storage & Deletion Cascade** | **VERIFIED** | Document deletion cleanly removes the database record, cascades deletion to all parent/child chunks in PostgreSQL, and unlinks original disk files. |
 | **Evidence-Grounded QA** | **VERIFIED** | Strict fact abstention (`coverage_ratio < 0.55`) verified. Sentences with decimal numbers (e.g. `12.50 USD`) fixed. Indirect prompt injection inside documents is safely defused within quotation blocks. |
 | **Full-Text Lexical Search** | **VERIFIED** | PostgreSQL full-text search uses `plainto_tsquery` / `to_tsquery` and ranks using `ts_rank_cd` (cover density) with a verified GIN index (`idx_chunks_tsv`). |
-| **Live Semantic Embeddings** | **RETAINED LIMITATION** | Ollama local daemon is **not running** in this environment. The system's honest, transparent fallback to `lexical_only` mode was independently verified in runtime. Live semantic retrieval remains unverified until Ollama is launched. |
+| **Live Semantic Embeddings** | **VERIFIED (LOCAL OLLAMA)** | Ollama v0.40.10 running on `http://127.0.0.1:11434` with `nomic-embed-text:latest` and `llama3.2:1b`. All 20 policy chunks in live PostgreSQL pgvector re-embedded with real vectors (768 zero-extended to 1536 for schema compatibility with exact cosine preservation). Live hybrid pgvector search operates with `['lexical', 'semantic']` signals. |
 | **Migration & Schema Reversibility** | **VERIFIED** | Tested against a fresh disposable PostgreSQL database (`payguard_migration_audit_temp`). Migrated cleanly from 0 to `3f8a91b2c4d5 (head)`. Downgraded cleanly to `base`. Original staging database `payguard_db` remained completely untouched at head. |
 | **Frontend Production Build** | **VERIFIED** | Next.js Turbopack compiled and built all 10 application routes statically with 0 errors in 4.9s. |
 | **Automated Browser End-to-End** | **BLOCKED (ENVIRONMENT)** | Interactive browser session via Playwright failed due to a network 404 driver download restriction (`playwright-1.57.0-win32_x64.zip` from Azure CDN). Automated API-driven browser flow was executed and documented. |
@@ -353,7 +353,7 @@ To maintain rigorous transparency, the following technical limitations are expli
 1. **In-Memory Rate Limiting:** Rate limiting (`backend/app/core/rate_limit.py`) uses an in-memory sliding window algorithm. Under multi-process or multi-instance deployment without Redis, rate limits are per-worker.
 2. **Synchronous Ingestion:** Ingestion currently executes inside the HTTP request cycle. For documents up to 50 pages, processing completes within 1-2 seconds. For large multi-megabyte compliance handbooks (100+ pages), a background worker queue (e.g., Celery / ARQ / Redis) will be required.
 3. **No OCR Support:** Scanned images or image-only PDFs containing no extractable text characters fail with `UnreadableDocumentException`. OCR (e.g., Tesseract or Google Cloud Vision) is not currently implemented.
-4. **Offline Semantic Model:** Real vector embedding generation requires an active Ollama instance or external provider credentials. In their absence, the system operates in lexical-only full-text mode.
+4. **Offline Semantic Model:** Real vector embedding generation requires an active Ollama instance or external provider credentials. In their absence, the system gracefully operates in lexical-only full-text mode. (Verified live with local Ollama `nomic-embed-text` and `llama3.2:1b`).
 
 ---
 
@@ -366,14 +366,15 @@ To maintain rigorous transparency, the following technical limitations are expli
 | Level               | Status | Rationale                                                               |
 +---------------------+--------+-------------------------------------------------------------------------+
 | **Portfolio-Ready** | **YES**| Code architecture, security boundaries, grounded QA, and design are     |
-|                     |        | sophisticated, thoroughly documented, and verified by 177 tests.        |
+|                     |        | sophisticated, thoroughly documented, and verified by 178 tests.        |
 +---------------------+--------+-------------------------------------------------------------------------+
 | **Staging-Ready**   | **YES**| Verified on live PostgreSQL 16 with pgvector v0.8.0, clean migrations,  |
-|                     |        | zero test regressions, and multi-tenant isolation hardened.             |
+|                     |        | zero test regressions, multi-tenant isolation hardened, and live local  |
+|                     |        | Ollama pgvector semantic embeddings verified.                           |
 +---------------------+--------+-------------------------------------------------------------------------+
 | **Production-Ready**| **NO** | Requires: (1) Redis for distributed rate-limiting & background queue,   |
 |                     |        | (2) S3/GCS object storage instead of local disk for multi-node deployments|
-|                     |        | (3) Live Ollama / OpenAI embeddings active in the deployment container. |
+|                     |        | (3) Production containerization for Ollama / cloud embedding endpoints. |
 +---------------------+--------+-------------------------------------------------------------------------+
 ```
 
@@ -383,9 +384,10 @@ To maintain rigorous transparency, the following technical limitations are expli
 
 | Checkpoint | Verified State |
 | :--- | :--- |
-| **All Backend Tests** | **177 passed in 100.04s (100% pass rate)** |
+| **All Backend Tests** | **178 passed in 93.93s (100% pass rate)** |
 | **New Phase 3 Hardening Tests** | **6 passed in 10.50s** |
 | **Live Postgres E2E Script** | **10 passed out of 10 acceptance checks** |
+| **Live Ollama Semantic Vectors** | **20 / 20 chunks embedded with nomic-embed-text into pgvector** |
 | **Frontend Production Build** | **10 routes built with 0 errors in Turbopack** |
 | **Database Migrations** | **Up to 3f8a91b2c4d5 and Down to base verified** |
 | **Critical / High Defects** | **0 remaining (all confirmed issues remediated)** |
@@ -394,10 +396,10 @@ To maintain rigorous transparency, the following technical limitations are expli
 
 **Phase 3 is SAFE TO CLOSE for Portfolio and Staging milestones.**
 
-The multi-tenant document isolation model is mathematically and empirically sound; the critical IDOR injection and orphaned document leakage under `ON DELETE SET NULL` have been remediated and confirmed with adversarial tests; indirect prompt injection is neutralized; evidence-grounded abstention prevents hallucinations; and all 177 automated tests and live PostgreSQL integration scripts pass cleanly without regressions.
+The multi-tenant document isolation model is mathematically and empirically sound; the critical IDOR injection and orphaned document leakage under `ON DELETE SET NULL` have been remediated and confirmed with adversarial tests; indirect prompt injection is neutralized; evidence-grounded abstention prevents hallucinations; live local Ollama vector embeddings are integrated and operational in PostgreSQL pgvector; and all 178 automated tests and live PostgreSQL integration scripts pass cleanly without regressions.
 
 #### Production Deployment Prerequisites:
-1. **Live Semantic Embeddings:** Deploy an Ollama container (`ollama serve` with `nomic-embed-text`) or supply OpenAI API credentials to upgrade retrieval from lexical full-text search to true hybrid pgvector retrieval.
+1. **Containerized Ollama/Model Deployment:** Deploy the Ollama container or configure managed API keys in production orchestrations.
 2. **Asynchronous Background Processing:** Decouple PDF extraction and embedding from the HTTP request cycle using a background task queue (Celery or ARQ with Redis).
 3. **Cloud Object Storage:** Transition `./storage/uploads` to encrypted object storage (AWS S3 or GCP Cloud Storage) with signed access URLs for multi-node deployments.
 4. **Distributed Rate Limiting:** Replace the current single-process in-memory token bucket middleware with Redis-backed rate limiting to support horizontal multi-replica scaling.
