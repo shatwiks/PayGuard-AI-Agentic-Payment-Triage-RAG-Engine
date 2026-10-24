@@ -1,9 +1,12 @@
 """Knowledge base retrieval, document management, and grounded QA API router."""
 
 import hashlib
+import logging
 import os
 from typing import List, Optional
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from fastapi import (
     APIRouter,
@@ -245,8 +248,10 @@ async def delete_document(
     if doc.storage_path and os.path.exists(doc.storage_path):
         try:
             os.remove(doc.storage_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                f"Failed to remove document file on disk at '{doc.storage_path}' during deletion of document '{doc.id}': {e}"
+            )
 
     # Soft-delete or hard delete
     await db.delete(doc)
