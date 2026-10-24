@@ -125,6 +125,7 @@ class DocumentQAService:
             document_ids=authorized_doc_ids,
             user_id=user.id,
             scope=request.scope,
+            user_role=user.role,
             include_parent_context=True,
         )
 
