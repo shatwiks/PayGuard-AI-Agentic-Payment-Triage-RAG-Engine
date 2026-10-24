@@ -558,9 +558,13 @@ async def seed_knowledge_documents(
                 chunk = DocumentChunk(
                     id=uuid.uuid4(),
                     document_id=doc_id,
+                    parent_chunk_id=None,
+                    chunk_type="standalone",
                     chunk_index=idx,
                     section_header=chunk_data["section"],
+                    section_title=chunk_data["section"],
                     content=chunk_data["content"],
+                    content_hash=hashlib.sha256(chunk_data["content"].encode("utf-8")).hexdigest(),
                     token_count=len(chunk_data["content"].split()),
                     embedding=chunk_embedding,
                     embedding_model=chunk_model,
@@ -568,6 +572,7 @@ async def seed_knowledge_documents(
                         "provenance": provenance,
                         "version": doc_data["version"],
                         "source_id": doc_data.get("source_id"),
+                        "section_title": chunk_data["section"],
                     },
                 )
                 session.add(chunk)
@@ -780,15 +785,98 @@ async def seed_database(reset: bool = False, session: Optional[AsyncSession] = N
             await _execute_seed(s)
 
 
+async def backfill_hierarchical_knowledge_documents(
+    session: AsyncSession,
+    provider: Optional[IEmbeddingProvider] = None,
+    force: bool = False,
+) -> dict:
+    """Rebuilds parent-child hierarchical chunk structure across authoritative policy documents."""
+    from backend.app.services.ingestion import DocumentIngestionPipeline
+
+    if provider is None:
+        provider = get_embedding_provider()
+
+    pipeline = DocumentIngestionPipeline(session, embedding_provider=provider)
+    processed_count = 0
+    parents_created = 0
+    children_created = 0
+    total_tokens = 0
+    max_child_tokens = 0
+    missing_relationships = 0
+    duplicates_detected = 0
+
+    seen_hashes = set()
+
+    for doc_data in SAMPLE_DOCUMENTS:
+        raw_text = "\n\n".join(f"# {c['section']}\n{c['content']}" for c in doc_data["chunks"])
+        res = await pipeline.ingest_document(
+            title=doc_data["title"],
+            content=raw_text,
+            source_id=doc_data["source_id"],
+            doc_type=doc_data["doc_type"],
+            version=doc_data["version"],
+            source_url=doc_data["source_url"],
+            hierarchical=True,
+            force_reindex=force,
+        )
+        processed_count += 1
+        p_chunks = res.parent_chunks or []
+        c_chunks = res.child_chunks or []
+        parents_created += len(p_chunks)
+        children_created += len(c_chunks)
+
+        for c in c_chunks:
+            tok = c.token_count
+            total_tokens += tok
+            if tok > max_child_tokens:
+                max_child_tokens = tok
+            if c.parent_chunk_id is None and c.chunk_type == "child":
+                missing_relationships += 1
+            if c.content_hash:
+                if c.content_hash in seen_hashes:
+                    duplicates_detected += 1
+                else:
+                    seen_hashes.add(c.content_hash)
+
+    avg_child_tokens = round(total_tokens / children_created, 1) if children_created > 0 else 0.0
+
+    return {
+        "status": "completed",
+        "documents_processed": processed_count,
+        "parents_created": parents_created,
+        "children_created": children_created,
+        "avg_child_tokens": avg_child_tokens,
+        "max_child_tokens": max_child_tokens,
+        "missing_relationships": missing_relationships,
+        "duplicates_detected": duplicates_detected,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="PayGuard AI Database Seeder & Embedding Pipeline")
     parser.add_argument("--reset", action="store_true", help="Truncate tables before seeding")
     parser.add_argument("--reembed-live", action="store_true", help="Re-embed eligible chunks using configured real embedding provider")
+    parser.add_argument("--hierarchical", action="store_true", help="Backfill/ingest documents with hierarchical parent-child structure")
     parser.add_argument("--force", action="store_true", help="Force re-embedding all chunks even if already embedded")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size for re-embedding")
     args = parser.parse_args()
 
-    if args.reembed_live:
+    if args.hierarchical:
+        async def _run_hierarchical():
+            async with AsyncSessionLocal() as s:
+                report = await backfill_hierarchical_knowledge_documents(s, force=args.force)
+                print("\n=== PAYGUARD HIERARCHICAL INGESTION REPORT ===")
+                print(f"Status:                 {report['status']}")
+                print(f"Documents Processed:    {report['documents_processed']}")
+                print(f"Parents Created:        {report['parents_created']}")
+                print(f"Children Created:       {report['children_created']}")
+                print(f"Avg Child Chunk Size:   {report['avg_child_tokens']} tokens")
+                print(f"Max Child Chunk Size:   {report['max_child_tokens']} tokens")
+                print(f"Missing Relationships:  {report['missing_relationships']}")
+                print(f"Duplicates Detected:    {report['duplicates_detected']}")
+                print("==============================================\n")
+        asyncio.run(_run_hierarchical())
+    elif args.reembed_live:
         async def _run_reembed():
             async with AsyncSessionLocal() as s:
                 report = await reembed_knowledge_chunks(s, force=args.force, batch_size=args.batch_size)

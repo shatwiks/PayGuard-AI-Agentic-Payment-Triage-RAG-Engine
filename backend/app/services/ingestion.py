@@ -1,5 +1,6 @@
 """Document ingestion, chunking, and re-embedding pipeline for PayGuard AI RAG."""
 
+from datetime import datetime, timezone
 import hashlib
 import logging
 from typing import Any, Dict, List, Optional
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.models.knowledge import DocumentChunk, KnowledgeDocument
-from backend.app.services.chunker import DocumentChunker
+from backend.app.services.chunker import DocumentChunker, TextChunk
 from backend.app.services.embedding import IEmbeddingProvider, get_embedding_provider
 
 logger = logging.getLogger("payguard.ingestion")
@@ -40,6 +41,8 @@ class IngestionResult(BaseModel):
     message: str
     document: Optional[Any] = None
     chunks: Optional[List[Any]] = None
+    parent_chunks: Optional[List[Any]] = None
+    child_chunks: Optional[List[Any]] = None
 
     def __iter__(self):
         yield self.document
@@ -47,7 +50,7 @@ class IngestionResult(BaseModel):
 
 
 class DocumentIngestionPipeline:
-    """Manages document validation, normalization, section-aware chunking, and pgvector persistence."""
+    """Manages document validation, normalization, hierarchical chunking, and pgvector persistence."""
 
     def __init__(
         self,
@@ -73,6 +76,7 @@ class DocumentIngestionPipeline:
         content: Optional[str] = None,
         metadata: Optional[dict] = None,
         force_reindex: bool = False,
+        hierarchical: bool = False,
     ) -> IngestionResult:
         """Ingests a document with deduplication, chunking, and optional vector generation."""
         if request is None:
@@ -122,22 +126,37 @@ class DocumentIngestionPipeline:
                     )
 
         # 1. Normalize and chunk text
-        chunks = self.chunker.split_document(
-            text=request.raw_content,
-            document_title=request.title,
-            source_id=request.source_id,
-        )
+        if hierarchical:
+            hierarchical_res = self.chunker.split_hierarchical(
+                text=request.raw_content,
+                document_title=request.title,
+                source_id=request.source_id,
+                metadata=metadata,
+            )
+            parent_text_chunks = hierarchical_res.parents
+            child_text_chunks = hierarchical_res.children
+            text_chunks = hierarchical_res.all_chunks
+        else:
+            text_chunks = self.chunker.split_document(
+                text=request.raw_content,
+                document_title=request.title,
+                source_id=request.source_id,
+                metadata=metadata,
+            )
+            parent_text_chunks = []
+            child_text_chunks = text_chunks
 
-        if not chunks:
+        if not text_chunks:
             raise ValueError(f"Document '{request.title}' yielded no valid text chunks after normalization")
 
         # 2. Generate embeddings if provider is available
         embeddings_generated = False
-        chunk_embeddings: List[Optional[List[float]]] = [None] * len(chunks)
+        chunk_embeddings: List[Optional[List[float]]] = [None] * len(text_chunks)
 
         if self.provider.is_available:
             try:
-                texts = [c.content for c in chunks]
+                # Generate embeddings for text chunks
+                texts = [c.content for c in text_chunks]
                 vectors = await self.provider.embed_batch(texts)
                 chunk_embeddings = [self.provider.validate_vector(v) for v in vectors]
                 embeddings_generated = True
@@ -179,47 +198,152 @@ class DocumentIngestionPipeline:
 
         await self.session.flush()
 
-        # Insert new chunks
+        # 4. Insert chunks with parent-child linkage
         created_chunks: List[DocumentChunk] = []
-        for idx, chunk in enumerate(chunks):
-            db_chunk = DocumentChunk(
-                id=uuid.uuid4(),
-                document_id=doc_id,
-                chunk_index=chunk.chunk_index,
-                section_header=chunk.section_header,
-                content=chunk.content,
-                token_count=chunk.token_count,
-                embedding=chunk_embeddings[idx] if embeddings_generated else None,
-                embedding_model=target_model if embeddings_generated else None,
-                metadata_={
-                    **chunk.metadata,
-                    "doc_type": request.doc_type,
-                    "version": request.version,
-                    "source_id": request.source_id,
-                    "provenance": "verified_ingestion",
-                },
-            )
-            self.session.add(db_chunk)
-            created_chunks.append(db_chunk)
+        created_parent_chunks: List[DocumentChunk] = []
+        created_child_chunks: List[DocumentChunk] = []
+
+        if hierarchical:
+            # First pass: Create and persist parent chunks to get their database IDs
+            parent_id_map: Dict[int, uuid.UUID] = {}
+            for idx, p_chunk in enumerate(parent_text_chunks):
+                p_id = uuid.uuid4()
+                parent_id_map[p_chunk.chunk_index] = p_id
+
+                # Match embedding if computed
+                p_emb = chunk_embeddings[idx] if embeddings_generated and idx < len(chunk_embeddings) else None
+
+                db_parent = DocumentChunk(
+                    id=p_id,
+                    document_id=doc_id,
+                    parent_chunk_id=None,
+                    chunk_type="parent",
+                    chunk_index=p_chunk.chunk_index,
+                    section_header=p_chunk.section_header,
+                    section_title=p_chunk.section_title or p_chunk.section_header,
+                    content=p_chunk.content,
+                    content_hash=p_chunk.content_hash,
+                    token_count=p_chunk.token_count,
+                    embedding=p_emb,
+                    embedding_model=target_model if embeddings_generated and p_emb else None,
+                    metadata_={
+                        **p_chunk.metadata,
+                        "doc_type": request.doc_type,
+                        "version": request.version,
+                        "source_id": request.source_id,
+                        "provenance": "verified_ingestion",
+                    },
+                )
+                self.session.add(db_parent)
+                created_parent_chunks.append(db_parent)
+                created_chunks.append(db_parent)
+
+            await self.session.flush()
+
+            # Second pass: Create child chunks linking to parents
+            child_offset = len(parent_text_chunks)
+            for c_idx, c_chunk in enumerate(child_text_chunks):
+                parent_db_id = parent_id_map.get(c_chunk.parent_index)
+                emb_idx = child_offset + c_idx
+                c_emb = chunk_embeddings[emb_idx] if embeddings_generated and emb_idx < len(chunk_embeddings) else None
+
+                db_child = DocumentChunk(
+                    id=uuid.uuid4(),
+                    document_id=doc_id,
+                    parent_chunk_id=parent_db_id,
+                    chunk_type="child",
+                    chunk_index=c_chunk.chunk_index,
+                    section_header=c_chunk.section_header,
+                    section_title=c_chunk.section_title or c_chunk.section_header,
+                    content=c_chunk.content,
+                    content_hash=c_chunk.content_hash,
+                    token_count=c_chunk.token_count,
+                    embedding=c_emb,
+                    embedding_model=target_model if embeddings_generated and c_emb else None,
+                    metadata_={
+                        **c_chunk.metadata,
+                        "doc_type": request.doc_type,
+                        "version": request.version,
+                        "source_id": request.source_id,
+                        "parent_chunk_id": str(parent_db_id) if parent_db_id else None,
+                        "provenance": "verified_ingestion",
+                    },
+                )
+                self.session.add(db_child)
+                created_child_chunks.append(db_child)
+                created_chunks.append(db_child)
+        else:
+            # Standalone flat chunking
+            for idx, chunk in enumerate(text_chunks):
+                db_chunk = DocumentChunk(
+                    id=uuid.uuid4(),
+                    document_id=doc_id,
+                    parent_chunk_id=None,
+                    chunk_type="standalone",
+                    chunk_index=chunk.chunk_index,
+                    section_header=chunk.section_header,
+                    section_title=chunk.section_title or chunk.section_header,
+                    content=chunk.content,
+                    content_hash=chunk.content_hash,
+                    token_count=chunk.token_count,
+                    embedding=chunk_embeddings[idx] if embeddings_generated else None,
+                    embedding_model=target_model if embeddings_generated else None,
+                    metadata_={
+                        **chunk.metadata,
+                        "doc_type": request.doc_type,
+                        "version": request.version,
+                        "source_id": request.source_id,
+                        "provenance": "verified_ingestion",
+                    },
+                )
+                self.session.add(db_chunk)
+                created_chunks.append(db_chunk)
+                created_child_chunks.append(db_chunk)
 
         await self.session.commit()
 
         status_str = "success" if embeddings_generated else "lexical_only"
         msg = (
-            f"Successfully ingested and embedded {len(chunks)} chunks with model '{target_model}'."
+            f"Successfully ingested and embedded {len(created_chunks)} chunks with model '{target_model}'."
             if embeddings_generated
-            else f"Ingested {len(chunks)} chunks in lexical-only mode (real embedding provider offline)."
+            else f"Ingested {len(created_chunks)} chunks in lexical-only mode (real embedding provider offline)."
         )
 
         return IngestionResult(
             document_id=doc_id,
             title=request.title,
             source_id=request.source_id,
-            chunks_count=len(chunks),
+            chunks_count=len(created_chunks),
             embeddings_generated=embeddings_generated,
             embedding_model=target_model,
             status=status_str,
             message=msg,
             document=doc_obj,
             chunks=created_chunks,
+            parent_chunks=created_parent_chunks if hierarchical else None,
+            child_chunks=created_child_chunks if hierarchical else created_chunks,
+        )
+
+    async def ingest_hierarchical_document(
+        self,
+        title: str,
+        content: str,
+        source_id: Optional[str] = None,
+        doc_type: str = "scheme_rules",
+        version: str = "1.0",
+        source_url: Optional[str] = None,
+        metadata: Optional[dict] = None,
+        force_reindex: bool = False,
+    ) -> IngestionResult:
+        """Convenience method to ingest a document with parent-child hierarchical chunking enabled."""
+        return await self.ingest_document(
+            title=title,
+            raw_content=content,
+            source_id=source_id,
+            doc_type=doc_type,
+            version=version,
+            source_url=source_url,
+            metadata=metadata,
+            force_reindex=force_reindex,
+            hierarchical=True,
         )

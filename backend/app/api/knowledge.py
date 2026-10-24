@@ -61,6 +61,7 @@ async def ingest_policy_document(
         doc_type=request.document_type,
         version=request.version,
         source_url=request.source_url,
+        hierarchical=request.hierarchical,
     )
     content_hash = (
         result.document.content_hash
