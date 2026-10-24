@@ -213,9 +213,9 @@ class DocumentQAService:
         best_match_excerpt = None
         max_matches = 0
 
-        # Scan excerpts for sentences matching query words
+        # Scan excerpts for sentences matching query words (preserving decimal numbers like 12.50)
         for exc in cited_excerpts:
-            sentences = [s.strip() for s in re.split(r"[.\n]\s*", exc.excerpt) if len(s.strip()) > 15]
+            sentences = [s.strip() for s in re.split(r"(?<!\d)\.(?!\d)\s*|\n+", exc.excerpt) if len(s.strip()) > 15]
             for s in sentences:
                 s_lower = s.lower()
                 matches = sum(1 for w in query_words if w in s_lower)

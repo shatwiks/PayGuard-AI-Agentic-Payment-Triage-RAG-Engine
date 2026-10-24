@@ -196,6 +196,7 @@ class DocumentIngestionPipeline:
                 content_hash=content_hash,
                 raw_content=request.raw_content,
                 is_active=True,
+                is_system=True,
             )
             self.session.add(doc_obj)
 

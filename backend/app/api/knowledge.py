@@ -63,7 +63,7 @@ async def search_knowledge_documents(
 ) -> KnowledgeSearchResponse:
     """Executes hybrid, lexical-only, or semantic-only search over authorized document chunks."""
     retrieval_service = HybridRetrievalService(session=db)
-    return await retrieval_service.search(request, user_id=current_user.id)
+    return await retrieval_service.search(request, user_id=current_user.id, user_role=current_user.role)
 
 
 @router.post(

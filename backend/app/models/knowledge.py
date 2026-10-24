@@ -154,6 +154,12 @@ class KnowledgeDocument(Base, TimestampMixin):
         foreign_keys=[uploaded_by_id]
     )
 
+    def __init__(self, *args, **kwargs):
+        if "is_system" not in kwargs:
+            is_user_upload = kwargs.get("doc_type") == "user_upload" or kwargs.get("uploaded_by_id") is not None
+            kwargs["is_system"] = not is_user_upload
+        super().__init__(*args, **kwargs)
+
 
 class DocumentChunk(Base):
     """Chunked passages with pgvector embeddings for hybrid RAG retrieval."""

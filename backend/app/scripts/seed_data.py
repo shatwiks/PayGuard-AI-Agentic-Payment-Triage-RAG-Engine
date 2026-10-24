@@ -528,6 +528,7 @@ async def seed_knowledge_documents(
                 raw_content=raw_text,
                 content_hash=content_hash,
                 is_active=True,
+                is_system=True,
             )
             session.add(doc)
             results.append(doc)
