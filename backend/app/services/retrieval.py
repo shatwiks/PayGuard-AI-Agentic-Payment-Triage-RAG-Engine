@@ -199,6 +199,10 @@ class HybridRetrievalService:
         eff_doc_type = doc_type or source_type
         target_model = self.provider.model_name
 
+        if target_model == "synthetic_placeholder":
+            logger.warning("Semantic search requested with synthetic_placeholder model; rejecting to prevent synthetic matching.")
+            return []
+
         if query_vector is None:
             if not self.provider.is_available:
                 return []
@@ -215,6 +219,7 @@ class HybridRetrievalService:
                 .where(
                     KnowledgeDocument.is_active == True,  # noqa: E712
                     DocumentChunk.embedding_model == target_model,
+                    DocumentChunk.embedding_model != "synthetic_placeholder",
                     DocumentChunk.embedding.isnot(None),
                 )
                 .options(selectinload(DocumentChunk.document))
@@ -239,6 +244,7 @@ class HybridRetrievalService:
                 .where(
                     KnowledgeDocument.is_active == True,  # noqa: E712
                     DocumentChunk.embedding_model == target_model,
+                    DocumentChunk.embedding_model != "synthetic_placeholder",
                     DocumentChunk.embedding.isnot(None),
                 )
                 .options(selectinload(DocumentChunk.document))

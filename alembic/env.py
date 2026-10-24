@@ -35,6 +35,8 @@ def get_url():
         url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
     elif "aiosqlite" in url:
         url = url.replace("sqlite+aiosqlite://", "sqlite://")
+    if "@localhost:" in url:
+        url = url.replace("@localhost:", "@127.0.0.1:")
     return url
 
 

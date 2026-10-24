@@ -110,6 +110,8 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
         )
 
     async def embed_query(self, text: str) -> List[float]:
+        if not text or not text.strip():
+            raise EmbeddingValidationException("Cannot generate embedding for empty or blank query text.")
         results = await self.embed_batch([text])
         return results[0]
 
@@ -121,6 +123,12 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
 
         if not texts:
             return []
+
+        for idx, t in enumerate(texts):
+            if not t or not t.strip():
+                raise EmbeddingValidationException(
+                    f"Cannot generate embedding for empty or blank text at index {idx}."
+                )
 
         all_embeddings: List[List[float]] = []
 
@@ -150,12 +158,29 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
                     response.raise_for_status()
                     data = response.json()
 
+                if not isinstance(data, dict) or "data" not in data or not isinstance(data["data"], list):
+                    raise EmbeddingValidationException(
+                        "Embedding provider response missing valid 'data' list."
+                    )
+
+                items = data["data"]
+                if len(items) != len(batch):
+                    raise EmbeddingValidationException(
+                        f"Embedding provider returned {len(items)} embeddings for batch of size {len(batch)}."
+                    )
+
                 # Extract and order embeddings
-                items = sorted(data["data"], key=lambda x: x["index"])
-                for item in items:
+                sorted_items = sorted(items, key=lambda x: x.get("index", 0) if isinstance(x, dict) else 0)
+                for item in sorted_items:
+                    if not isinstance(item, dict) or "embedding" not in item:
+                        raise EmbeddingValidationException(
+                            "Embedding provider item missing required 'embedding' key."
+                        )
                     vec = self.validate_vector(item["embedding"])
                     all_embeddings.append(vec)
 
+            except (EmbeddingValidationException, EmbeddingProviderUnavailableException):
+                raise
             except httpx.HTTPStatusError as e:
                 # Sanitize error to avoid leaking API key
                 status_code = e.response.status_code if e.response else 500
@@ -200,6 +225,8 @@ class MockEmbeddingProvider(IEmbeddingProvider):
     async def embed_query(self, text: str) -> List[float]:
         if not self._available:
             raise EmbeddingProviderUnavailableException("Mock embedding provider offline")
+        if not text or not text.strip():
+            raise EmbeddingValidationException("Cannot generate embedding for empty or blank query text.")
         if self._fixed_vector:
             return self.validate_vector(self._fixed_vector)
         # Deterministic unit vector derived from text hash for test reproducibility
@@ -213,6 +240,13 @@ class MockEmbeddingProvider(IEmbeddingProvider):
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         if not self._available:
             raise EmbeddingProviderUnavailableException("Mock embedding provider offline")
+        if not texts:
+            return []
+        for idx, t in enumerate(texts):
+            if not t or not t.strip():
+                raise EmbeddingValidationException(
+                    f"Cannot generate embedding for empty or blank text at index {idx}."
+                )
         return [await self.embed_query(t) for t in texts]
 
 
