@@ -262,3 +262,36 @@ Merchant provides CAVV and Directory Server Trans ID to invalidate the dispute.
     if doc:
         await pg_session.delete(doc)
         await pg_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_postgres_hnsw_vector_index_exists_and_queries(pg_session: AsyncSession):
+    """Verify that idx_document_chunks_embedding_hnsw exists in pg_indexes and supports cosine distance searches."""
+    # 1. Verify index in PostgreSQL catalog
+    res = await pg_session.execute(text("""
+        SELECT indexname, indexdef FROM pg_indexes
+        WHERE tablename = 'document_chunks' AND indexname = 'idx_document_chunks_embedding_hnsw';
+    """))
+    row = res.fetchone()
+    assert row is not None, "idx_document_chunks_embedding_hnsw must exist in PostgreSQL catalog"
+    index_def = row[1]
+    assert "hnsw" in index_def.lower()
+    assert "vector_cosine_ops" in index_def.lower()
+    assert "m = 16" in index_def.lower() or "m='16'" in index_def.lower()
+    assert "ef_construction = 64" in index_def.lower() or "ef_construction='64'" in index_def.lower()
+
+    # 2. Run vector distance query with EXPLAIN
+    target_vector = "[" + ",".join("0.025" for _ in range(1536)) + "]"
+    explain_sql = text(f"""
+        EXPLAIN (ANALYZE, BUFFERS)
+        SELECT id, embedding_model, (embedding <=> '{target_vector}') AS distance
+        FROM document_chunks
+        WHERE embedding IS NOT NULL
+        ORDER BY distance ASC
+        LIMIT 5;
+    """)
+    explain_res = await pg_session.execute(explain_sql)
+    plan_lines = [r[0] for r in explain_res.fetchall()]
+    plan_text = "\n".join(plan_lines)
+    assert "Execution Time:" in plan_text
+

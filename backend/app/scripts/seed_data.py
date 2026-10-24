@@ -14,10 +14,17 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import logging
+import os
 import sys
 from typing import List, Optional
 import uuid
-from sqlalchemy import select, text
+
+# Ensure repository root is on sys.path for CLI execution
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.database import AsyncSessionLocal
@@ -26,6 +33,10 @@ from backend.app.models.audit import AuditEvent
 from backend.app.models.knowledge import DocumentChunk, KnowledgeDocument
 from backend.app.models.payment import Payment, PaymentEvent
 from backend.app.models.user import User
+from backend.app.services.embedding import (
+    IEmbeddingProvider,
+    get_embedding_provider,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("payguard.seeder")
@@ -486,9 +497,15 @@ async def seed_payments_and_events(session: AsyncSession) -> list[Payment]:
     return results
 
 
-async def seed_knowledge_documents(session: AsyncSession) -> list[KnowledgeDocument]:
+async def seed_knowledge_documents(
+    session: AsyncSession,
+    provider: Optional[IEmbeddingProvider] = None,
+) -> list[KnowledgeDocument]:
     """Idempotently seed authoritative policy and troubleshooting documents."""
     import hashlib
+    if provider is None:
+        provider = get_embedding_provider()
+
     results = []
     for doc_data in SAMPLE_DOCUMENTS:
         raw_text = "\n\n".join(c["content"] for c in doc_data["chunks"])
@@ -515,7 +532,29 @@ async def seed_knowledge_documents(session: AsyncSession) -> list[KnowledgeDocum
             session.add(doc)
             results.append(doc)
 
+            # Generate real provider embeddings if available
+            vectors: Optional[List[List[float]]] = None
+            if provider.is_available:
+                try:
+                    texts = [c["content"] for c in doc_data["chunks"]]
+                    vectors = await provider.embed_batch(texts)
+                except Exception as e:
+                    logger.warning(
+                        f"Live embedding generation failed during seed for '{doc_data['title']}': {e}. "
+                        "Falling back to unverified placeholder vectors."
+                    )
+                    vectors = None
+
             for idx, chunk_data in enumerate(doc_data["chunks"]):
+                if vectors is not None and idx < len(vectors):
+                    chunk_embedding = vectors[idx]
+                    chunk_model = provider.model_name
+                    provenance = "live_provider_generated"
+                else:
+                    chunk_embedding = [0.025] * 1536
+                    chunk_model = "synthetic_placeholder"
+                    provenance = "synthetic_placeholder_unverified"
+
                 chunk = DocumentChunk(
                     id=uuid.uuid4(),
                     document_id=doc_id,
@@ -523,10 +562,10 @@ async def seed_knowledge_documents(session: AsyncSession) -> list[KnowledgeDocum
                     section_header=chunk_data["section"],
                     content=chunk_data["content"],
                     token_count=len(chunk_data["content"].split()),
-                    embedding=[0.025] * 1536,
-                    embedding_model="synthetic_placeholder",
+                    embedding=chunk_embedding,
+                    embedding_model=chunk_model,
                     metadata_={
-                        "provenance": "official_scheme_manual",
+                        "provenance": provenance,
                         "version": doc_data["version"],
                         "source_id": doc_data.get("source_id"),
                     },
@@ -541,6 +580,155 @@ async def seed_knowledge_documents(session: AsyncSession) -> list[KnowledgeDocum
 
     await session.commit()
     return results
+
+
+async def reembed_knowledge_chunks(
+    session: AsyncSession,
+    provider: Optional[IEmbeddingProvider] = None,
+    force: bool = False,
+    batch_size: int = 32,
+) -> dict:
+    """Safely and resumably re-embeds eligible knowledge chunks using the active provider.
+
+    Persists genuine embedding vectors to PostgreSQL and updates chunk metadata.
+    Avoids duplicating chunks. Resumable via per-batch database transactions.
+    """
+    if provider is None:
+        provider = get_embedding_provider()
+
+    logger.info(f"Re-embedding workflow initiated with provider model: {provider.model_name}")
+
+    # 1. Total chunk count
+    total_stmt = select(func.count(DocumentChunk.id))
+    total_chunks = (await session.execute(total_stmt)).scalar_one()
+
+    # 2. Check provider availability
+    if not provider.is_available:
+        msg = (
+            f"Embedding provider '{provider.model_name}' credentials unavailable (OPENAI_API_KEY missing or placeholder). "
+            "Live semantic embeddings remain unverified. Existing chunks were not modified."
+        )
+        logger.warning(msg)
+        return {
+            "status": "unverified_provider_unavailable",
+            "provider": provider.model_name,
+            "provider_available": False,
+            "total_chunks": total_chunks,
+            "eligible_chunks": 0,
+            "reembedded": 0,
+            "skipped": total_chunks,
+            "failed": 0,
+            "message": msg,
+        }
+
+    # 3. Query eligible chunks
+    if force:
+        eligible_stmt = (
+            select(DocumentChunk)
+            .where(
+                or_(
+                    DocumentChunk.embedding_model != provider.model_name,
+                    DocumentChunk.embedding.is_(None),
+                    DocumentChunk.embedding_model.is_(None),
+                )
+            )
+            .order_by(DocumentChunk.document_id, DocumentChunk.chunk_index)
+        )
+    else:
+        eligible_stmt = (
+            select(DocumentChunk)
+            .where(
+                or_(
+                    DocumentChunk.embedding_model == "synthetic_placeholder",
+                    DocumentChunk.embedding.is_(None),
+                    DocumentChunk.embedding_model.is_(None),
+                )
+            )
+            .order_by(DocumentChunk.document_id, DocumentChunk.chunk_index)
+        )
+
+    eligible_res = await session.execute(eligible_stmt)
+    eligible_chunks = list(eligible_res.scalars().all())
+    eligible_count = len(eligible_chunks)
+    skipped_count = total_chunks - eligible_count
+
+    if not eligible_chunks:
+        msg = f"All {total_chunks} chunks already embedded with model '{provider.model_name}'. No re-embedding needed."
+        logger.info(msg)
+        return {
+            "status": "up_to_date",
+            "provider": provider.model_name,
+            "provider_available": True,
+            "total_chunks": total_chunks,
+            "eligible_chunks": 0,
+            "reembedded": 0,
+            "skipped": total_chunks,
+            "failed": 0,
+            "message": msg,
+        }
+
+    logger.info(f"Found {eligible_count} eligible chunks to re-embed ({skipped_count} skipped/up-to-date).")
+
+    reembedded_count = 0
+    failed_count = 0
+
+    # 4. Batch processing with transactional per-batch commit for resumability
+    for i in range(0, eligible_count, batch_size):
+        batch = eligible_chunks[i : i + batch_size]
+        texts = [c.content for c in batch]
+
+        try:
+            vectors = await provider.embed_batch(texts)
+            if len(vectors) != len(batch):
+                raise ValueError(f"Vector count mismatch: expected {len(batch)}, got {len(vectors)}")
+
+            for chunk, vec in zip(batch, vectors):
+                valid_vec = provider.validate_vector(vec)
+                chunk.embedding = valid_vec
+                chunk.embedding_model = provider.model_name
+                metadata = dict(chunk.metadata_ or {})
+                metadata["reembedded_at"] = datetime.now(timezone.utc).isoformat()
+                metadata["provenance"] = "live_provider_generated"
+                metadata["embedding_model"] = provider.model_name
+                chunk.metadata_ = metadata
+
+            await session.commit()
+            reembedded_count += len(batch)
+            logger.info(f"Progress: {reembedded_count}/{eligible_count} chunks re-embedded and committed.")
+
+        except Exception as e:
+            await session.rollback()
+            failed_count += len(batch)
+            logger.error(
+                f"Failed to embed batch starting at index {i}: {e}. "
+                "Rolled back batch. Previously committed batches remain safe."
+            )
+            return {
+                "status": "failed",
+                "provider": provider.model_name,
+                "provider_available": True,
+                "total_chunks": total_chunks,
+                "eligible_chunks": eligible_count,
+                "reembedded": reembedded_count,
+                "skipped": skipped_count,
+                "failed": failed_count,
+                "error": str(e),
+                "message": f"Batch re-embedding aborted due to error: {e}",
+            }
+
+    msg = f"Successfully re-embedded {reembedded_count} chunks using {provider.model_name}."
+    logger.info(msg)
+    return {
+        "status": "completed",
+        "provider": provider.model_name,
+        "provider_available": True,
+        "total_chunks": total_chunks,
+        "eligible_chunks": eligible_count,
+        "reembedded": reembedded_count,
+        "skipped": skipped_count,
+        "failed": 0,
+        "message": msg,
+    }
 
 
 async def seed_database(reset: bool = False, session: Optional[AsyncSession] = None):
@@ -593,11 +781,31 @@ async def seed_database(reset: bool = False, session: Optional[AsyncSession] = N
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PayGuard AI Database Seeder")
+    parser = argparse.ArgumentParser(description="PayGuard AI Database Seeder & Embedding Pipeline")
     parser.add_argument("--reset", action="store_true", help="Truncate tables before seeding")
+    parser.add_argument("--reembed-live", action="store_true", help="Re-embed eligible chunks using configured real embedding provider")
+    parser.add_argument("--force", action="store_true", help="Force re-embedding all chunks even if already embedded")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for re-embedding")
     args = parser.parse_args()
 
-    asyncio.run(seed_database(reset=args.reset))
+    if args.reembed_live:
+        async def _run_reembed():
+            async with AsyncSessionLocal() as s:
+                report = await reembed_knowledge_chunks(s, force=args.force, batch_size=args.batch_size)
+                print("\n=== PAYGUARD RAG RE-EMBEDDING REPORT ===")
+                print(f"Status:             {report['status']}")
+                print(f"Provider:           {report['provider']}")
+                print(f"Provider Available: {report['provider_available']}")
+                print(f"Total Chunks:       {report['total_chunks']}")
+                print(f"Eligible Chunks:    {report.get('eligible_chunks', 0)}")
+                print(f"Re-embedded:        {report['reembedded']}")
+                print(f"Skipped:            {report['skipped']}")
+                print(f"Failed:             {report['failed']}")
+                print(f"Message:            {report['message']}")
+                print("=========================================\n")
+        asyncio.run(_run_reembed())
+    else:
+        asyncio.run(seed_database(reset=args.reset))
 
 
 if __name__ == "__main__":
