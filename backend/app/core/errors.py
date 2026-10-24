@@ -25,10 +25,13 @@ class EntityNotFoundException(PayGuardException):
     """Raised when an entity is not found in database."""
     def __init__(self, entity_name: str, identifier: Any = ""):
         super().__init__(
-            message=f"{entity_name} with identifier '{identifier}' was not found.",
+            message=f"{entity_name} with identifier '{identifier}' was not found." if identifier else str(entity_name),
             code="ENTITY_NOT_FOUND",
             status_code=status.HTTP_404_NOT_FOUND,
         )
+
+
+NotFoundException = EntityNotFoundException
 
 
 class UnauthorizedException(PayGuardException):

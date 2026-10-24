@@ -89,6 +89,45 @@ class HybridRetrievalService:
         bind = self.session.bind
         return bool(bind and bind.dialect.name == "postgresql")
 
+    def _apply_scope_and_doc_filters(
+        self,
+        stmt,
+        document_ids: Optional[List[uuid.UUID]] = None,
+        user_id: Optional[uuid.UUID] = None,
+        scope: str = "all",
+    ):
+        """Applies document-level isolation, ownership, and scope filtering."""
+        if document_ids:
+            stmt = stmt.where(DocumentChunk.document_id.in_(document_ids))
+        elif scope == "uploaded":
+            if user_id:
+                stmt = stmt.where(
+                    KnowledgeDocument.uploaded_by_id == user_id,
+                    KnowledgeDocument.is_system.is_(False),
+                )
+            else:
+                stmt = stmt.where(
+                    KnowledgeDocument.is_system.is_(False),
+                    KnowledgeDocument.uploaded_by_id.isnot(None),
+                )
+        elif scope == "knowledge_base":
+            stmt = stmt.where(
+                or_(
+                    KnowledgeDocument.is_system.is_(True),
+                    KnowledgeDocument.uploaded_by_id.is_(None),
+                )
+            )
+        elif user_id:
+            # "all": System knowledge base (is_system is True or uploaded_by_id is None) or user's own uploaded documents
+            stmt = stmt.where(
+                or_(
+                    KnowledgeDocument.is_system.is_(True),
+                    KnowledgeDocument.uploaded_by_id.is_(None),
+                    KnowledgeDocument.uploaded_by_id == user_id,
+                )
+            )
+        return stmt
+
     async def lexical_search(
         self,
         query: str = "",
@@ -99,6 +138,9 @@ class HybridRetrievalService:
         source_type: Optional[str] = None,
         scheme: Optional[str] = None,
         condition_code: Optional[str] = None,
+        document_ids: Optional[List[uuid.UUID]] = None,
+        user_id: Optional[uuid.UUID] = None,
+        scope: str = "all",
     ) -> List[LexicalSearchResult]:
         """Executes lexical search returning (chunk, rank, score). Uses PostgreSQL tsvector if available."""
         search_query = (query_text or query).strip()
@@ -134,6 +176,7 @@ class HybridRetrievalService:
                 )
                 .options(selectinload(DocumentChunk.document))
             )
+            stmt = self._apply_scope_and_doc_filters(stmt, document_ids=document_ids, user_id=user_id, scope=scope)
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
@@ -184,6 +227,7 @@ class HybridRetrievalService:
                 )
                 .options(selectinload(DocumentChunk.document))
             )
+            stmt = self._apply_scope_and_doc_filters(stmt, document_ids=document_ids, user_id=user_id, scope=scope)
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
@@ -221,6 +265,9 @@ class HybridRetrievalService:
         scheme: Optional[str] = None,
         condition_code: Optional[str] = None,
         min_similarity: Optional[float] = None,
+        document_ids: Optional[List[uuid.UUID]] = None,
+        user_id: Optional[uuid.UUID] = None,
+        scope: str = "all",
     ) -> List[SemanticSearchResult]:
         """Executes pgvector semantic search returning (chunk, rank, distance, similarity)."""
         eff_limit = limit or top_k
@@ -253,6 +300,7 @@ class HybridRetrievalService:
                 )
                 .options(selectinload(DocumentChunk.document))
             )
+            stmt = self._apply_scope_and_doc_filters(stmt, document_ids=document_ids, user_id=user_id, scope=scope)
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
@@ -295,6 +343,7 @@ class HybridRetrievalService:
                 )
                 .options(selectinload(DocumentChunk.document))
             )
+            stmt = self._apply_scope_and_doc_filters(stmt, document_ids=document_ids, user_id=user_id, scope=scope)
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
 
@@ -337,11 +386,16 @@ class HybridRetrievalService:
         condition_code: Optional[str] = None,
         include_parent_context: bool = True,
         min_score: Optional[float] = None,
+        document_ids: Optional[List[uuid.UUID]] = None,
+        user_id: Optional[uuid.UUID] = None,
+        scope: str = "all",
     ) -> KnowledgeSearchResponse:
         """Executes hybrid, lexical-only, or semantic-only retrieval with parent context fetching and RRF."""
         search_query = query or (request if isinstance(request, str) else None)
         if isinstance(request, KnowledgeSearchRequest):
             req_obj = request
+            eff_doc_ids = document_ids or req_obj.document_ids
+            eff_scope = scope if scope != "all" else getattr(req_obj, "scope", "all")
         elif search_query:
             req_obj = KnowledgeSearchRequest(
                 query=search_query,
@@ -352,7 +406,11 @@ class HybridRetrievalService:
                 condition_code=condition_code,
                 include_parent_context=include_parent_context,
                 min_score=min_score,
+                document_ids=document_ids,
+                scope=scope,
             )
+            eff_doc_ids = document_ids
+            eff_scope = scope
         else:
             raise ValueError("Query string or KnowledgeSearchRequest must be provided to search()")
 
@@ -368,6 +426,9 @@ class HybridRetrievalService:
                 doc_type=req_obj.doc_type,
                 scheme=req_obj.scheme,
                 condition_code=req_obj.condition_code,
+                document_ids=eff_doc_ids,
+                user_id=user_id,
+                scope=eff_scope,
             )
             for chunk, rank, score in lexical_items:
                 candidate_map[chunk.id] = {
@@ -396,6 +457,9 @@ class HybridRetrievalService:
                     doc_type=req_obj.doc_type,
                     scheme=req_obj.scheme,
                     condition_code=req_obj.condition_code,
+                    document_ids=eff_doc_ids,
+                    user_id=user_id,
+                    scope=eff_scope,
                 )
                 for chunk, rank, dist, sim in semantic_items:
                     if chunk.id in candidate_map:

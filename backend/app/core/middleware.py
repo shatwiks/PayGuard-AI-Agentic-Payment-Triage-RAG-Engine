@@ -44,22 +44,25 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
     """Enforces strict maximum request body size limits to prevent memory exhaustion."""
 
-    def __init__(self, app, max_body_bytes: int = 1_048_576):
+    def __init__(self, app, max_body_bytes: int = 1_048_576, max_upload_bytes: int = 10_485_760):
         super().__init__(app)
         self.max_body_bytes = max_body_bytes
+        self.max_upload_bytes = max_upload_bytes
 
     async def dispatch(self, request: Request, call_next) -> Response:
         content_length = request.headers.get("content-length")
         if content_length:
             try:
                 length = int(content_length)
-                if length > self.max_body_bytes:
+                is_upload_path = "/knowledge/upload" in request.url.path
+                effective_limit = self.max_upload_bytes if is_upload_path else self.max_body_bytes
+                if length > effective_limit:
                     return JSONResponse(
                         status_code=413,
                         content={
                             "error": {
                                 "code": "PAYLOAD_TOO_LARGE",
-                                "message": f"Request body exceeds maximum allowed limit of {self.max_body_bytes} bytes.",
+                                "message": f"Request body exceeds maximum allowed limit of {effective_limit} bytes.",
                             }
                         },
                     )

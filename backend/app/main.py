@@ -35,6 +35,7 @@ def create_application() -> FastAPI:
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=settings.REQUEST_MAX_BODY_BYTES,
+        max_upload_bytes=settings.UPLOAD_MAX_FILE_SIZE_BYTES,
     )
 
     # 2. Set up CORS middleware

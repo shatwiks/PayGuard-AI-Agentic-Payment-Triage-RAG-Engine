@@ -6,6 +6,8 @@
 
 import {
   ApiErrorEnvelope,
+  DocumentAskResponse,
+  DocumentUploadResponse,
   HealthResponse,
   InvestigationCase,
   InvestigationCreateRequest,
@@ -16,6 +18,8 @@ import {
   PaymentSummary,
   TokenResponse,
   User,
+  UserDocumentDetail,
+  UserDocumentSummary,
 } from "./types";
 
 const API_BASE_URL =
@@ -74,11 +78,14 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  const isFormData = typeof FormData !== "undefined" && rest.body instanceof FormData;
   const requestHeaders: Record<string, string> = {
-    "Content-Type": "application/json",
     Accept: "application/json",
     ...(headers as Record<string, string>),
   };
+  if (!isFormData) {
+    requestHeaders["Content-Type"] = "application/json";
+  }
 
   if (!skipAuth) {
     const token = getStoredToken();
@@ -297,6 +304,8 @@ export const api = {
     retrieval_mode?: "hybrid" | "semantic_only" | "lexical_only";
     doc_type?: string;
     min_score?: number;
+    document_ids?: string[];
+    scope?: string;
   }): Promise<KnowledgeSearchResponse> {
     return request<KnowledgeSearchResponse>("/knowledge/search", {
       method: "POST",
@@ -306,7 +315,61 @@ export const api = {
         retrieval_mode: payload.retrieval_mode ?? "hybrid",
         doc_type: payload.doc_type || undefined,
         min_score: payload.min_score || undefined,
+        document_ids: payload.document_ids || undefined,
+        scope: payload.scope || "all",
+      }),
+    });
+  },
+
+  // User-Uploaded Documents & Grounded QA
+  async uploadDocument(file: File, title?: string, docType?: string): Promise<DocumentUploadResponse> {
+    const formData = new FormData();
+    formData.append("file", file);
+    if (title) formData.append("title", title);
+    if (docType) formData.append("doc_type", docType);
+
+    return request<DocumentUploadResponse>("/knowledge/upload", {
+      method: "POST",
+      body: formData,
+    });
+  },
+
+  async listDocuments(scope: string = "uploaded", page: number = 1, pageSize: number = 20): Promise<UserDocumentSummary[]> {
+    const qs = new URLSearchParams({
+      scope,
+      page: String(page),
+      page_size: String(pageSize),
+    }).toString();
+    return request<UserDocumentSummary[]>(`/knowledge/documents?${qs}`);
+  },
+
+  async getDocument(id: string): Promise<UserDocumentDetail> {
+    return request<UserDocumentDetail>(`/knowledge/documents/${id}`);
+  },
+
+  async deleteDocument(id: string): Promise<{ success: boolean; message: string }> {
+    return request<{ success: boolean; message: string }>(`/knowledge/documents/${id}`, {
+      method: "DELETE",
+    });
+  },
+
+  async askDocumentQuestion(payload: {
+    query: string;
+    document_ids?: string[];
+    scope?: string;
+    top_k?: number;
+    retrieval_mode?: string;
+  }): Promise<DocumentAskResponse> {
+    return request<DocumentAskResponse>("/knowledge/ask", {
+      method: "POST",
+      body: JSON.stringify({
+        query: payload.query,
+        document_ids: payload.document_ids || undefined,
+        scope: payload.scope || "uploaded",
+        top_k: payload.top_k ?? 5,
+        retrieval_mode: payload.retrieval_mode ?? "hybrid",
       }),
     });
   },
 };
+
