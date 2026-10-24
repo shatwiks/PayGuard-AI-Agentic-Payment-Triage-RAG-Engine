@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     RETRIEVAL_LEXICAL_WEIGHT: float = 1.0
     RETRIEVAL_SEMANTIC_WEIGHT: float = 1.0
 
+    # Phase 2: Hierarchical Chunking Settings
+    CHUNK_PARENT_SIZE: int = 1000
+    CHUNK_PARENT_OVERLAP: int = 100
+    CHUNK_CHILD_SIZE: int = 200
+    CHUNK_CHILD_OVERLAP: int = 30
+    CHUNK_TABLE_AWARE_ENABLED: bool = True
+
     # Security & Reliability (Phase 6)
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_LOGIN_PER_MINUTE: int = 15

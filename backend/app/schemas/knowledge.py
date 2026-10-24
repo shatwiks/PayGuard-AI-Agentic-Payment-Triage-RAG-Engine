@@ -24,6 +24,18 @@ class KnowledgeSearchRequest(BaseModel):
         le=1.0,
         description="Optional minimum reciprocal rank fusion or similarity threshold",
     )
+    scheme: Optional[str] = Field(
+        default=None,
+        description="Optional filter by payment scheme (e.g. Visa, NACHA, Mastercard, UPI, FedNow)",
+    )
+    condition_code: Optional[str] = Field(
+        default=None,
+        description="Optional filter by dispute condition or return reason code (e.g. 10.4, R01)",
+    )
+    include_parent_context: bool = Field(
+        default=True,
+        description="Whether to fetch and attach surrounding parent chunk context for retrieved child chunks",
+    )
 
 
 class RankingDetails(BaseModel):
@@ -38,21 +50,32 @@ class RankingDetails(BaseModel):
 
 
 class SearchResultItem(BaseModel):
-    """Individual retrieved document chunk with source provenance and scoring metadata."""
+    """Individual retrieved document chunk with source provenance, hierarchy, and scoring metadata."""
     model_config = ConfigDict(from_attributes=True)
 
     chunk_id: uuid.UUID = Field(description="UUID of the matched document chunk")
     document_id: uuid.UUID = Field(description="UUID of the parent knowledge document")
+    parent_chunk_id: Optional[uuid.UUID] = Field(default=None, description="UUID of parent section chunk if this is a child chunk")
+    chunk_type: str = Field(default="standalone", description="Chunk hierarchy type: parent, child, or standalone")
     title: str = Field(description="Title of the source policy document")
     source_id: Optional[str] = Field(default=None, description="Stable source URI or identifier")
     source_url: Optional[str] = Field(default=None, description="Canonical link or reference location")
+    source_document: Optional[str] = Field(default=None, description="Name of source document")
     doc_type: str = Field(description="Document category")
     chunk_index: int = Field(description="0-based sequence index in document")
     section_header: str = Field(description="Heading or rule section")
+    section_title: Optional[str] = Field(default=None, description="Clean section title")
     content: str = Field(description="Verbatim chunk text content")
+    parent_content: Optional[str] = Field(default=None, description="Surrounding context from parent chunk")
     token_count: int = Field(description="Estimated token count")
+    content_hash: Optional[str] = Field(default=None, description="SHA-256 hash of chunk content")
+    scheme: Optional[str] = Field(default=None, description="Payment scheme if detected e.g. Visa, NACHA")
+    condition_code: Optional[str] = Field(default=None, description="Dispute condition or return reason code")
+    effective_date: Optional[str] = Field(default=None, description="Effective policy date in ISO format")
+    page_number: Optional[int] = Field(default=None, description="Source page number if applicable")
     embedding_model: Optional[str] = Field(default=None, description="Model identifier used to produce embedding")
     retrieval_mode: Optional[str] = Field(default="hybrid", description="Retrieval mode used for this result")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Structured chunk metadata")
     ranking: RankingDetails = Field(description="Scoring and ranking diagnostics")
 
     @computed_field
@@ -87,6 +110,7 @@ class KnowledgeIngestRequest(BaseModel):
     document_type: str = Field(default="policy", max_length=64, description="Document type")
     version: str = Field(default="1.0", max_length=32, description="Version string")
     source_url: Optional[str] = Field(default=None, max_length=512, description="Source URL")
+    hierarchical: bool = Field(default=True, description="Enable parent-child hierarchical chunking")
 
 
 class KnowledgeIngestResponse(BaseModel):

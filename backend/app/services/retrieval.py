@@ -97,6 +97,8 @@ class HybridRetrievalService:
         limit: Optional[int] = None,
         doc_type: Optional[str] = None,
         source_type: Optional[str] = None,
+        scheme: Optional[str] = None,
+        condition_code: Optional[str] = None,
     ) -> List[LexicalSearchResult]:
         """Executes lexical search returning (chunk, rank, score). Uses PostgreSQL tsvector if available."""
         search_query = (query_text or query).strip()
@@ -128,11 +130,28 @@ class HybridRetrievalService:
                 .where(
                     KnowledgeDocument.is_active == True,  # noqa: E712
                     match_condition,
+                    or_(DocumentChunk.chunk_type != "parent", DocumentChunk.chunk_type.is_(None)),
                 )
                 .options(selectinload(DocumentChunk.document))
             )
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
+
+            if scheme:
+                stmt = stmt.where(
+                    or_(
+                        DocumentChunk.metadata_["scheme"].as_string() == scheme,
+                        DocumentChunk.content.ilike(f"%{scheme}%"),
+                    )
+                )
+
+            if condition_code:
+                stmt = stmt.where(
+                    or_(
+                        DocumentChunk.metadata_["condition_code"].as_string() == condition_code,
+                        DocumentChunk.content.ilike(f"%{condition_code}%"),
+                    )
+                )
 
             stmt = stmt.order_by(score_expr.desc())
             stmt = stmt.limit(eff_limit)
@@ -161,11 +180,18 @@ class HybridRetrievalService:
                 .where(
                     KnowledgeDocument.is_active == True,  # noqa: E712
                     or_(*or_conditions),
+                    or_(DocumentChunk.chunk_type != "parent", DocumentChunk.chunk_type.is_(None)),
                 )
                 .options(selectinload(DocumentChunk.document))
             )
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
+
+            if scheme:
+                stmt = stmt.where(DocumentChunk.content.ilike(f"%{scheme}%"))
+
+            if condition_code:
+                stmt = stmt.where(DocumentChunk.content.ilike(f"%{condition_code}%"))
 
             stmt = stmt.limit(eff_limit * 2)
             res = await self.session.execute(stmt)
@@ -192,6 +218,8 @@ class HybridRetrievalService:
         limit: Optional[int] = None,
         doc_type: Optional[str] = None,
         source_type: Optional[str] = None,
+        scheme: Optional[str] = None,
+        condition_code: Optional[str] = None,
         min_similarity: Optional[float] = None,
     ) -> List[SemanticSearchResult]:
         """Executes pgvector semantic search returning (chunk, rank, distance, similarity)."""
@@ -221,11 +249,28 @@ class HybridRetrievalService:
                     DocumentChunk.embedding_model == target_model,
                     DocumentChunk.embedding_model != "synthetic_placeholder",
                     DocumentChunk.embedding.isnot(None),
+                    or_(DocumentChunk.chunk_type != "parent", DocumentChunk.chunk_type.is_(None)),
                 )
                 .options(selectinload(DocumentChunk.document))
             )
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
+
+            if scheme:
+                stmt = stmt.where(
+                    or_(
+                        DocumentChunk.metadata_["scheme"].as_string() == scheme,
+                        DocumentChunk.content.ilike(f"%{scheme}%"),
+                    )
+                )
+
+            if condition_code:
+                stmt = stmt.where(
+                    or_(
+                        DocumentChunk.metadata_["condition_code"].as_string() == condition_code,
+                        DocumentChunk.content.ilike(f"%{condition_code}%"),
+                    )
+                )
 
             stmt = stmt.order_by(distance_expr.asc()).limit(eff_limit)
             res = await self.session.execute(stmt)
@@ -246,11 +291,18 @@ class HybridRetrievalService:
                     DocumentChunk.embedding_model == target_model,
                     DocumentChunk.embedding_model != "synthetic_placeholder",
                     DocumentChunk.embedding.isnot(None),
+                    or_(DocumentChunk.chunk_type != "parent", DocumentChunk.chunk_type.is_(None)),
                 )
                 .options(selectinload(DocumentChunk.document))
             )
             if eff_doc_type:
                 stmt = stmt.where(KnowledgeDocument.doc_type == eff_doc_type)
+
+            if scheme:
+                stmt = stmt.where(DocumentChunk.content.ilike(f"%{scheme}%"))
+
+            if condition_code:
+                stmt = stmt.where(DocumentChunk.content.ilike(f"%{condition_code}%"))
 
             res = await self.session.execute(stmt)
             chunks = res.scalars().all()
@@ -281,9 +333,12 @@ class HybridRetrievalService:
         retrieval_mode: str = "hybrid",
         doc_type: Optional[str] = None,
         source_type: Optional[str] = None,
+        scheme: Optional[str] = None,
+        condition_code: Optional[str] = None,
+        include_parent_context: bool = True,
         min_score: Optional[float] = None,
     ) -> KnowledgeSearchResponse:
-        """Executes hybrid, lexical-only, or semantic-only retrieval with Reciprocal Rank Fusion."""
+        """Executes hybrid, lexical-only, or semantic-only retrieval with parent context fetching and RRF."""
         search_query = query or (request if isinstance(request, str) else None)
         if isinstance(request, KnowledgeSearchRequest):
             req_obj = request
@@ -293,6 +348,9 @@ class HybridRetrievalService:
                 top_k=top_k,
                 retrieval_mode=retrieval_mode,
                 doc_type=doc_type or source_type,
+                scheme=scheme,
+                condition_code=condition_code,
+                include_parent_context=include_parent_context,
                 min_score=min_score,
             )
         else:
@@ -308,6 +366,8 @@ class HybridRetrievalService:
                 query=req_obj.query,
                 top_k=req_obj.top_k * 3,
                 doc_type=req_obj.doc_type,
+                scheme=req_obj.scheme,
+                condition_code=req_obj.condition_code,
             )
             for chunk, rank, score in lexical_items:
                 candidate_map[chunk.id] = {
@@ -334,6 +394,8 @@ class HybridRetrievalService:
                     query=req_obj.query,
                     top_k=req_obj.top_k * 3,
                     doc_type=req_obj.doc_type,
+                    scheme=req_obj.scheme,
+                    condition_code=req_obj.condition_code,
                 )
                 for chunk, rank, dist, sim in semantic_items:
                     if chunk.id in candidate_map:
@@ -367,6 +429,23 @@ class HybridRetrievalService:
         # 3. Reciprocal Rank Fusion (RRF) calculation
         scored_candidates: List[SearchResultItem] = []
 
+        # Batch load parent chunks for context attachment if requested
+        parent_map: Dict[uuid.UUID, DocumentChunk] = {}
+        if req_obj.include_parent_context:
+            parent_ids = {
+                chunk.parent_chunk_id
+                for cid, data in candidate_map.items()
+                if (chunk := data.get("chunk")) and chunk.parent_chunk_id is not None
+            }
+            if parent_ids:
+                p_stmt = (
+                    select(DocumentChunk)
+                    .where(DocumentChunk.id.in_(list(parent_ids)))
+                )
+                p_res = await self.session.execute(p_stmt)
+                for p_chunk in p_res.scalars().all():
+                    parent_map[p_chunk.id] = p_chunk
+
         for cid, data in candidate_map.items():
             chunk: DocumentChunk = data["chunk"]
             signals = []
@@ -394,20 +473,35 @@ class HybridRetrievalService:
                 signals_used=signals,
             )
 
+            parent_chunk_obj = parent_map.get(chunk.parent_chunk_id) if chunk.parent_chunk_id else None
+            parent_content = parent_chunk_obj.content if parent_chunk_obj else None
+            meta_dict = dict(chunk.metadata_ or {})
+
             scored_candidates.append(
                 SearchResultItem(
                     chunk_id=chunk.id,
                     document_id=chunk.document_id,
+                    parent_chunk_id=chunk.parent_chunk_id,
+                    chunk_type=chunk.chunk_type or "standalone",
                     title=chunk.document.title if chunk.document else "Unknown Document",
                     source_id=chunk.document.source_id if chunk.document else None,
                     source_url=chunk.document.source_url if chunk.document else None,
+                    source_document=meta_dict.get("source_document") or (chunk.document.title if chunk.document else None),
                     doc_type=chunk.document.doc_type if chunk.document else "policy",
                     chunk_index=chunk.chunk_index,
                     section_header=chunk.section_header,
+                    section_title=chunk.section_title or chunk.section_header,
                     content=chunk.content,
+                    parent_content=parent_content,
                     token_count=chunk.token_count,
+                    content_hash=chunk.content_hash,
+                    scheme=meta_dict.get("scheme"),
+                    condition_code=meta_dict.get("condition_code"),
+                    effective_date=meta_dict.get("effective_date"),
+                    page_number=meta_dict.get("page_number"),
                     embedding_model=chunk.embedding_model,
                     retrieval_mode=effective_mode,
+                    metadata=meta_dict,
                     ranking=ranking_info,
                 )
             )
@@ -432,7 +526,7 @@ class HybridRetrievalService:
             citations.append(
                 PolicyCitation(
                     document_title=r.title,
-                    section_header=r.section_header,
+                    section_header=r.section_title or r.section_header,
                     excerpt=r.content[:350] + "..." if len(r.content) > 350 else r.content,
                     confidence_score=min(1.0, round(r.ranking.fusion_score * 30, 2)),
                     source_id=r.source_id,

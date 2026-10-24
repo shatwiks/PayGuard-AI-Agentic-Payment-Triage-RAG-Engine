@@ -295,3 +295,95 @@ async def test_postgres_hnsw_vector_index_exists_and_queries(pg_session: AsyncSe
     plan_text = "\n".join(plan_lines)
     assert "Execution Time:" in plan_text
 
+
+@pytest.mark.asyncio
+async def test_postgres_hierarchical_chunking_and_metadata_indexes(pg_session: AsyncSession):
+    """Verify Phase 2 hierarchical parent-child relationships, ON DELETE SET NULL, and metadata indexes in PostgreSQL."""
+    # 1. Verify Phase 2 indexes in PostgreSQL catalog
+    res = await pg_session.execute(text("""
+        SELECT indexname FROM pg_indexes
+        WHERE tablename = 'document_chunks'
+        AND indexname IN ('idx_chunks_parent_id', 'idx_chunks_chunk_type', 'idx_chunks_content_hash');
+    """))
+    found_indexes = {row[0] for row in res.fetchall()}
+    assert "idx_chunks_parent_id" in found_indexes, "idx_chunks_parent_id must exist in PostgreSQL"
+    assert "idx_chunks_chunk_type" in found_indexes, "idx_chunks_chunk_type must exist in PostgreSQL"
+    assert "idx_chunks_content_hash" in found_indexes, "idx_chunks_content_hash must exist in PostgreSQL"
+
+    # 2. Insert document and parent/child chunk hierarchy in PostgreSQL
+    doc_id = uuid.uuid4()
+    doc = KnowledgeDocument(
+        id=doc_id,
+        title="Live PG Hierarchical Policy",
+        doc_type="scheme_rules",
+        version="2.0",
+        source_id="internal://pg/hierarchical-live",
+        is_active=True,
+    )
+    pg_session.add(doc)
+    await pg_session.flush()
+
+    parent_id = uuid.uuid4()
+    parent = DocumentChunk(
+        id=parent_id,
+        document_id=doc_id,
+        parent_chunk_id=None,
+        chunk_type="parent",
+        chunk_index=0,
+        section_header="Visa Dispute Condition 10.4 Rules",
+        section_title="Visa Dispute Condition 10.4 Rules",
+        content="Full section body on card-absent fraud and EMV 3-D Secure liability shift.",
+        content_hash="hash_parent_pg_test_123",
+        token_count=15,
+        metadata_={"scheme": "Visa", "condition_code": "10.4", "effective_date": "2026-04-15"},
+    )
+    pg_session.add(parent)
+    await pg_session.flush()
+
+    child_id = uuid.uuid4()
+    child = DocumentChunk(
+        id=child_id,
+        document_id=doc_id,
+        parent_chunk_id=parent_id,
+        chunk_type="child",
+        chunk_index=1,
+        section_header="Visa Dispute Condition 10.4 Rules",
+        section_title="Visa Dispute Condition 10.4 Rules",
+        content="Child passage: When ECI is 05, liability shifts directly to issuer.",
+        content_hash="hash_child_pg_test_456",
+        token_count=12,
+        embedding=[0.025] * 1536,
+        embedding_model="mock-target-model",
+        metadata_={"scheme": "Visa", "condition_code": "10.4"},
+    )
+    pg_session.add(child)
+    await pg_session.commit()
+
+    # 3. Query parent-child relationship via SQL join in PostgreSQL
+    sql = text("""
+        SELECT c.id, c.chunk_type, p.id, p.chunk_type
+        FROM document_chunks c
+        JOIN document_chunks p ON c.parent_chunk_id = p.id
+        WHERE c.id = :child_id;
+    """)
+    join_res = (await pg_session.execute(sql, {"child_id": child_id})).fetchone()
+    assert join_res is not None
+    assert join_res[0] == child_id
+    assert join_res[1] == "child"
+    assert join_res[2] == parent_id
+    assert join_res[3] == "parent"
+
+    # 4. Verify PostgreSQL ON DELETE SET NULL
+    await pg_session.delete(parent)
+    await pg_session.commit()
+
+    check_child_sql = text("SELECT parent_chunk_id FROM document_chunks WHERE id = :child_id;")
+    child_parent_id = (await pg_session.execute(check_child_sql, {"child_id": child_id})).scalar()
+    assert child_parent_id is None, "PostgreSQL foreign key ON DELETE SET NULL must set parent_chunk_id to NULL"
+
+    # Cleanup
+    await pg_session.delete(child)
+    await pg_session.delete(doc)
+    await pg_session.commit()
+
+

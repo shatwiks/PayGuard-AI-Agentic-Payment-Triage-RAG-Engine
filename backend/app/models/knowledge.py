@@ -93,6 +93,9 @@ class DocumentChunk(Base):
     __tablename__ = "document_chunks"
     __table_args__ = (
         Index("idx_chunks_document_index", "document_id", "chunk_index"),
+        Index("idx_chunks_parent_id", "parent_chunk_id"),
+        Index("idx_chunks_chunk_type", "chunk_type"),
+        Index("idx_chunks_content_hash", "content_hash"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -106,6 +109,18 @@ class DocumentChunk(Base):
         index=True,
         nullable=False
     )
+    parent_chunk_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID,
+        ForeignKey("document_chunks.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True
+    )
+    chunk_type: Mapped[str] = mapped_column(
+        String(32),
+        default="standalone",
+        index=True,
+        nullable=False
+    )  # 'parent', 'child', 'standalone'
     chunk_index: Mapped[int] = mapped_column(
         Integer,
         nullable=False
@@ -114,9 +129,18 @@ class DocumentChunk(Base):
         String(255),
         nullable=False
     )
+    section_title: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True
+    )
     content: Mapped[str] = mapped_column(
         Text,
         nullable=False
+    )
+    content_hash: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        index=True,
+        nullable=True
     )
     token_count: Mapped[int] = mapped_column(
         Integer,
@@ -148,10 +172,23 @@ class DocumentChunk(Base):
         nullable=False
     )
 
-    # Relationship
+    # Relationships
     document: Mapped["KnowledgeDocument"] = relationship(
         "KnowledgeDocument",
         back_populates="chunks"
+    )
+    parent_chunk: Mapped[Optional["DocumentChunk"]] = relationship(
+        "DocumentChunk",
+        remote_side="DocumentChunk.id",
+        foreign_keys=[parent_chunk_id],
+        back_populates="child_chunks"
+    )
+    child_chunks: Mapped[List["DocumentChunk"]] = relationship(
+        "DocumentChunk",
+        back_populates="parent_chunk",
+        foreign_keys=[parent_chunk_id],
+        passive_deletes=True,
+        order_by="DocumentChunk.chunk_index"
     )
 
     def __init__(self, **kwargs: Any):
@@ -160,6 +197,10 @@ class DocumentChunk(Base):
             meta = kwargs.setdefault("metadata_", {})
             if isinstance(meta, dict):
                 meta.setdefault("source_id", source_id)
+        if "section_title" in kwargs and "section_header" not in kwargs:
+            kwargs["section_header"] = kwargs["section_title"] or "General"
+        elif "section_header" in kwargs and "section_title" not in kwargs:
+            kwargs["section_title"] = kwargs["section_header"]
         super().__init__(**kwargs)
 
     @property

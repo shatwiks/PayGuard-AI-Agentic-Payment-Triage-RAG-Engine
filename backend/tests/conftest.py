@@ -22,6 +22,16 @@ test_engine = create_async_engine(
     future=True,
 )
 
+from sqlalchemy import event
+
+
+@event.listens_for(test_engine.sync_engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 TestingSessionLocal = async_sessionmaker(
     bind=test_engine,
     class_=AsyncSession,
