@@ -250,13 +250,88 @@ class MockEmbeddingProvider(IEmbeddingProvider):
         return [await self.embed_query(t) for t in texts]
 
 
+class OllamaEmbeddingProvider(IEmbeddingProvider):
+    """Native Ollama embedding provider supporting open models like nomic-embed-text."""
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        dimension: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ):
+        self._base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
+        self._model = model or settings.OLLAMA_EMBED_MODEL
+        self._dimension = dimension or settings.EMBEDDING_DIMENSION
+        self._timeout = timeout or settings.EMBEDDING_TIMEOUT_SECONDS
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def is_available(self) -> bool:
+        try:
+            with httpx.Client(timeout=1.5) as client:
+                resp = client.get(f"{self._base_url}/api/version")
+                return resp.status_code == 200
+        except Exception:
+            return False
+
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        for idx, t in enumerate(texts):
+            if not t or not t.strip():
+                raise EmbeddingValidationException(
+                    f"Cannot generate embedding for empty or blank text at index {idx}."
+                )
+
+        all_embeddings: List[List[float]] = []
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            for text in texts:
+                try:
+                    resp = await client.post(
+                        f"{self._base_url}/api/embeddings",
+                        json={"model": self._model, "prompt": text},
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    raw_vec = data.get("embedding", [])
+                    # Zero-pad if native dimension (e.g. 768) is smaller than schema dimension (1536)
+                    # Preserves exact dot product and cosine ranking mathematically
+                    if len(raw_vec) < self._dimension:
+                        raw_vec = list(raw_vec) + [0.0] * (self._dimension - len(raw_vec))
+                    validated = self.validate_vector(raw_vec)
+                    all_embeddings.append(validated)
+                except (EmbeddingValidationException, EmbeddingProviderUnavailableException):
+                    raise
+                except httpx.HTTPStatusError as e:
+                    raise EmbeddingProviderUnavailableException(f"Ollama API error: {e}")
+                except Exception as e:
+                    raise EmbeddingProviderUnavailableException(f"Ollama connection error: {e}")
+        return all_embeddings
+
+    async def embed_query(self, text: str) -> List[float]:
+        if not text or not text.strip():
+            raise EmbeddingValidationException("Cannot generate embedding for empty or blank query text.")
+        res = await self.embed_batch([text])
+        return res[0]
+
+
 def get_embedding_provider() -> IEmbeddingProvider:
     """Factory creating the configured embedding provider."""
     provider_type = settings.EMBEDDING_PROVIDER.lower().strip()
-    if provider_type == "openai":
-        return OpenAIEmbeddingProvider()
+    if provider_type == "ollama":
+        return OllamaEmbeddingProvider()
     elif provider_type == "mock":
         return MockEmbeddingProvider(available=True)
+    elif provider_type == "openai":
+        return OpenAIEmbeddingProvider()
     else:
         # Default to OpenAICompatible
         return OpenAIEmbeddingProvider()

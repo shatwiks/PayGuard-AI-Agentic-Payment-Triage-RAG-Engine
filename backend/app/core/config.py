@@ -40,8 +40,11 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIMENSION: int = 1536
-    EMBEDDING_BATCH_SIZE: int = 32
-    EMBEDDING_TIMEOUT_SECONDS: float = 15.0
+    EMBEDDING_BATCH_SIZE: int = 16
+    EMBEDDING_TIMEOUT_SECONDS: float = 60.0
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
+    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
+    OLLAMA_LLM_MODEL: str = "llama3.2:1b"
     RAG_TOP_K: int = 5
     RETRIEVAL_HYBRID_RRF_K: int = 60
     RETRIEVAL_LEXICAL_WEIGHT: float = 1.0
