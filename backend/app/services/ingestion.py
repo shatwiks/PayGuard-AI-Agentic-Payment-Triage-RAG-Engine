@@ -1,8 +1,10 @@
 """Document ingestion, chunking, and re-embedding pipeline for PayGuard AI RAG."""
 
 from datetime import datetime, timezone
+import asyncio
 import hashlib
 import logging
+import re
 from typing import Any, Dict, List, Optional
 import uuid
 from pydantic import BaseModel, ConfigDict, Field
@@ -171,140 +173,145 @@ class DocumentIngestionPipeline:
                 target_model = None
 
         # 3. Persist document and chunks transactionally
-        doc_id = existing_doc.id if existing_doc else uuid.uuid4()
+        try:
+            doc_id = existing_doc.id if existing_doc else uuid.uuid4()
 
-        if existing_doc:
-            existing_doc.title = request.title
-            existing_doc.doc_type = request.doc_type
-            existing_doc.version = request.version
-            existing_doc.source_id = request.source_id
-            existing_doc.source_url = request.source_url
-            existing_doc.content_hash = content_hash
-            existing_doc.raw_content = request.raw_content
-            # Clear existing chunks
-            for old_chunk in list(existing_doc.chunks):
-                await self.session.delete(old_chunk)
-            doc_obj = existing_doc
-        else:
-            doc_obj = KnowledgeDocument(
-                id=doc_id,
-                title=request.title,
-                doc_type=request.doc_type,
-                version=request.version,
-                source_id=request.source_id,
-                source_url=request.source_url,
-                content_hash=content_hash,
-                raw_content=request.raw_content,
-                is_active=True,
-                is_system=True,
-            )
-            self.session.add(doc_obj)
-
-        await self.session.flush()
-
-        # 4. Insert chunks with parent-child linkage
-        created_chunks: List[DocumentChunk] = []
-        created_parent_chunks: List[DocumentChunk] = []
-        created_child_chunks: List[DocumentChunk] = []
-
-        if hierarchical:
-            # First pass: Create and persist parent chunks to get their database IDs
-            parent_id_map: Dict[int, uuid.UUID] = {}
-            for idx, p_chunk in enumerate(parent_text_chunks):
-                p_id = uuid.uuid4()
-                parent_id_map[p_chunk.chunk_index] = p_id
-
-                # Match embedding if computed
-                p_emb = chunk_embeddings[idx] if embeddings_generated and idx < len(chunk_embeddings) else None
-
-                db_parent = DocumentChunk(
-                    id=p_id,
-                    document_id=doc_id,
-                    parent_chunk_id=None,
-                    chunk_type="parent",
-                    chunk_index=p_chunk.chunk_index,
-                    section_header=p_chunk.section_header,
-                    section_title=p_chunk.section_title or p_chunk.section_header,
-                    content=p_chunk.content,
-                    content_hash=p_chunk.content_hash,
-                    token_count=p_chunk.token_count,
-                    embedding=p_emb,
-                    embedding_model=target_model if embeddings_generated and p_emb else None,
-                    metadata_={
-                        **p_chunk.metadata,
-                        "doc_type": request.doc_type,
-                        "version": request.version,
-                        "source_id": request.source_id,
-                        "provenance": "verified_ingestion",
-                    },
+            if existing_doc:
+                existing_doc.title = request.title
+                existing_doc.doc_type = request.doc_type
+                existing_doc.version = request.version
+                existing_doc.source_id = request.source_id
+                existing_doc.source_url = request.source_url
+                existing_doc.content_hash = content_hash
+                existing_doc.raw_content = request.raw_content
+                # Clear existing chunks
+                for old_chunk in list(existing_doc.chunks):
+                    await self.session.delete(old_chunk)
+                doc_obj = existing_doc
+            else:
+                doc_obj = KnowledgeDocument(
+                    id=doc_id,
+                    title=request.title,
+                    doc_type=request.doc_type,
+                    version=request.version,
+                    source_id=request.source_id,
+                    source_url=request.source_url,
+                    content_hash=content_hash,
+                    raw_content=request.raw_content,
+                    is_active=True,
+                    is_system=True,
                 )
-                self.session.add(db_parent)
-                created_parent_chunks.append(db_parent)
-                created_chunks.append(db_parent)
+                self.session.add(doc_obj)
 
             await self.session.flush()
 
-            # Second pass: Create child chunks linking to parents
-            child_offset = len(parent_text_chunks)
-            for c_idx, c_chunk in enumerate(child_text_chunks):
-                parent_db_id = parent_id_map.get(c_chunk.parent_index)
-                emb_idx = child_offset + c_idx
-                c_emb = chunk_embeddings[emb_idx] if embeddings_generated and emb_idx < len(chunk_embeddings) else None
+            # 4. Insert chunks with parent-child linkage
+            created_chunks: List[DocumentChunk] = []
+            created_parent_chunks: List[DocumentChunk] = []
+            created_child_chunks: List[DocumentChunk] = []
 
-                db_child = DocumentChunk(
-                    id=uuid.uuid4(),
-                    document_id=doc_id,
-                    parent_chunk_id=parent_db_id,
-                    chunk_type="child",
-                    chunk_index=c_chunk.chunk_index,
-                    section_header=c_chunk.section_header,
-                    section_title=c_chunk.section_title or c_chunk.section_header,
-                    content=c_chunk.content,
-                    content_hash=c_chunk.content_hash,
-                    token_count=c_chunk.token_count,
-                    embedding=c_emb,
-                    embedding_model=target_model if embeddings_generated and c_emb else None,
-                    metadata_={
-                        **c_chunk.metadata,
-                        "doc_type": request.doc_type,
-                        "version": request.version,
-                        "source_id": request.source_id,
-                        "parent_chunk_id": str(parent_db_id) if parent_db_id else None,
-                        "provenance": "verified_ingestion",
-                    },
-                )
-                self.session.add(db_child)
-                created_child_chunks.append(db_child)
-                created_chunks.append(db_child)
-        else:
-            # Standalone flat chunking
-            for idx, chunk in enumerate(text_chunks):
-                db_chunk = DocumentChunk(
-                    id=uuid.uuid4(),
-                    document_id=doc_id,
-                    parent_chunk_id=None,
-                    chunk_type="standalone",
-                    chunk_index=chunk.chunk_index,
-                    section_header=chunk.section_header,
-                    section_title=chunk.section_title or chunk.section_header,
-                    content=chunk.content,
-                    content_hash=chunk.content_hash,
-                    token_count=chunk.token_count,
-                    embedding=chunk_embeddings[idx] if embeddings_generated else None,
-                    embedding_model=target_model if embeddings_generated else None,
-                    metadata_={
-                        **chunk.metadata,
-                        "doc_type": request.doc_type,
-                        "version": request.version,
-                        "source_id": request.source_id,
-                        "provenance": "verified_ingestion",
-                    },
-                )
-                self.session.add(db_chunk)
-                created_chunks.append(db_chunk)
-                created_child_chunks.append(db_chunk)
+            if hierarchical:
+                # First pass: Create and persist parent chunks to get their database IDs
+                parent_id_map: Dict[int, uuid.UUID] = {}
+                for idx, p_chunk in enumerate(parent_text_chunks):
+                    p_id = uuid.uuid4()
+                    parent_id_map[p_chunk.chunk_index] = p_id
 
-        await self.session.commit()
+                    # Match embedding if computed
+                    p_emb = chunk_embeddings[idx] if embeddings_generated and idx < len(chunk_embeddings) else None
+
+                    db_parent = DocumentChunk(
+                        id=p_id,
+                        document_id=doc_id,
+                        parent_chunk_id=None,
+                        chunk_type="parent",
+                        chunk_index=p_chunk.chunk_index,
+                        section_header=p_chunk.section_header,
+                        section_title=p_chunk.section_title or p_chunk.section_header,
+                        content=p_chunk.content,
+                        content_hash=p_chunk.content_hash,
+                        token_count=p_chunk.token_count,
+                        embedding=p_emb,
+                        embedding_model=target_model if embeddings_generated and p_emb else None,
+                        metadata_={
+                            **p_chunk.metadata,
+                            "doc_type": request.doc_type,
+                            "version": request.version,
+                            "source_id": request.source_id,
+                            "provenance": "verified_ingestion",
+                        },
+                    )
+                    self.session.add(db_parent)
+                    created_parent_chunks.append(db_parent)
+                    created_chunks.append(db_parent)
+
+                await self.session.flush()
+
+                # Second pass: Create child chunks linking to parents
+                child_offset = len(parent_text_chunks)
+                for c_idx, c_chunk in enumerate(child_text_chunks):
+                    parent_db_id = parent_id_map.get(c_chunk.parent_index)
+                    emb_idx = child_offset + c_idx
+                    c_emb = chunk_embeddings[emb_idx] if embeddings_generated and emb_idx < len(chunk_embeddings) else None
+
+                    db_child = DocumentChunk(
+                        id=uuid.uuid4(),
+                        document_id=doc_id,
+                        parent_chunk_id=parent_db_id,
+                        chunk_type="child",
+                        chunk_index=c_chunk.chunk_index,
+                        section_header=c_chunk.section_header,
+                        section_title=c_chunk.section_title or c_chunk.section_header,
+                        content=c_chunk.content,
+                        content_hash=c_chunk.content_hash,
+                        token_count=c_chunk.token_count,
+                        embedding=c_emb,
+                        embedding_model=target_model if embeddings_generated and c_emb else None,
+                        metadata_={
+                            **c_chunk.metadata,
+                            "doc_type": request.doc_type,
+                            "version": request.version,
+                            "source_id": request.source_id,
+                            "parent_chunk_id": str(parent_db_id) if parent_db_id else None,
+                            "provenance": "verified_ingestion",
+                        },
+                    )
+                    self.session.add(db_child)
+                    created_child_chunks.append(db_child)
+                    created_chunks.append(db_child)
+            else:
+                # Standalone flat chunking
+                for idx, chunk in enumerate(text_chunks):
+                    db_chunk = DocumentChunk(
+                        id=uuid.uuid4(),
+                        document_id=doc_id,
+                        parent_chunk_id=None,
+                        chunk_type="standalone",
+                        chunk_index=chunk.chunk_index,
+                        section_header=chunk.section_header,
+                        section_title=chunk.section_title or chunk.section_header,
+                        content=chunk.content,
+                        content_hash=chunk.content_hash,
+                        token_count=chunk.token_count,
+                        embedding=chunk_embeddings[idx] if embeddings_generated else None,
+                        embedding_model=target_model if embeddings_generated else None,
+                        metadata_={
+                            **chunk.metadata,
+                            "doc_type": request.doc_type,
+                            "version": request.version,
+                            "source_id": request.source_id,
+                            "provenance": "verified_ingestion",
+                        },
+                    )
+                    self.session.add(db_chunk)
+                    created_chunks.append(db_chunk)
+                    created_child_chunks.append(db_chunk)
+
+            await self.session.commit()
+        except Exception as e:
+            await self.session.rollback()
+            logger.error("Database persistence failed for document '%s': %s", request.title, e)
+            raise
 
         status_str = "success" if embeddings_generated else "lexical_only"
         msg = (
@@ -365,7 +372,12 @@ class DocumentIngestionPipeline:
         from backend.app.services.document_parser import DocumentParser
 
         parser = DocumentParser()
-        parsed = parser.parse(file_bytes=file_bytes, filename=filename, mime_type=mime_type)
+        parsed = await asyncio.to_thread(
+            parser.parse,
+            file_bytes=file_bytes,
+            filename=filename,
+            mime_type=mime_type,
+        )
 
         # 1. Duplicate detection: Check if this user already uploaded identical file content
         stmt = (
@@ -387,7 +399,7 @@ class DocumentIngestionPipeline:
                 title=existing_doc.title,
                 source_id=existing_doc.source_id or f"user://upload/{existing_doc.id}",
                 chunks_count=existing_doc.chunk_count,
-                embeddings_generated=existing_doc.embedding_status == "completed",
+                embeddings_generated=existing_doc.embedding_status in ("embedded", "completed"),
                 embedding_model=self.provider.model_name if self.provider.is_available else None,
                 status="skipped_unchanged",
                 message="Duplicate document detected; returning existing record.",
@@ -402,9 +414,12 @@ class DocumentIngestionPipeline:
         storage_filename = f"{doc_id}_{safe_filename}"
         storage_path = os.path.join(settings.UPLOAD_STORAGE_DIR, storage_filename)
 
+        def _write_file_sync(path: str, data: bytes) -> None:
+            with open(path, "wb") as f:
+                f.write(data)
+
         try:
-            with open(storage_path, "wb") as f:
-                f.write(file_bytes)
+            await asyncio.to_thread(_write_file_sync, storage_path, file_bytes)
         except Exception as write_err:
             logger.error("Failed to write uploaded file to storage: %s", write_err)
             raise
@@ -466,14 +481,33 @@ class DocumentIngestionPipeline:
                     for fc in flat_chunks
                 ]
 
-            # Assign page numbers based on parsed page boundaries
+            # Assign page numbers based on parsed page boundaries with header-stripping and token fallback
+            normalized_pages = [
+                (p_num, re.sub(r"\s+", " ", p_text).strip().lower())
+                for p_num, p_text in parsed.pages
+            ]
             for c in child_chunks + parent_chunks:
-                snippet = c.content[:60].strip()
+                clean_body = re.sub(r"^#+\s*", "", c.content.strip(), flags=re.MULTILINE)
+                clean_norm = re.sub(r"\s+", " ", clean_body).strip().lower()
+                snippet_long = clean_norm[:60].strip()
+                snippet_short = clean_norm[:30].strip()
                 matched_page = None
-                for p_num, p_text in parsed.pages:
-                    if snippet in p_text or c.content[:30] in p_text:
+                for p_num, p_norm in normalized_pages:
+                    if (snippet_long and snippet_long in p_norm) or (snippet_short and snippet_short in p_norm):
                         matched_page = p_num
                         break
+                if matched_page is None and normalized_pages:
+                    # Fallback: pick page with highest token overlap
+                    chunk_tokens = set(re.findall(r"[a-z0-9]{3,}", clean_norm[:200]))
+                    if chunk_tokens:
+                        best_page, best_overlap = None, 0
+                        for p_num, p_norm in normalized_pages:
+                            overlap = sum(1 for tok in chunk_tokens if tok in p_norm)
+                            if overlap > best_overlap:
+                                best_overlap = overlap
+                                best_page = p_num
+                        if best_page is not None and best_overlap > 0:
+                            matched_page = best_page
                 if matched_page:
                     c.metadata["page_number"] = matched_page
 

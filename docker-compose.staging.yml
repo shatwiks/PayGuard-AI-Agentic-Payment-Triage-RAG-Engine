@@ -1,15 +1,17 @@
+name: payguard-staging
+
 services:
   db:
     image: pgvector/pgvector:pg16
     container_name: payguard_staging_db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-payguard_staging_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payguard_staging_secure_password_98234}
-      POSTGRES_DB: ${POSTGRES_DB:-payguard_staging_db}
+      POSTGRES_USER: ${STAGING_POSTGRES_USER:-payguard_staging_user}
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD:-payguard_staging_secure_password_98234}
+      POSTGRES_DB: ${STAGING_POSTGRES_DB:-payguard_staging_db}
     ports:
       # Expose only on loopback interface to prevent public exposure
-      - "127.0.0.1:${POSTGRES_PORT:-5435}:5432"
+      - "127.0.0.1:${STAGING_POSTGRES_PORT:-5435}:5432"
     volumes:
       - payguard_staging_pgdata:/var/lib/postgresql/data
       - ./backend/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -30,17 +32,27 @@ services:
     environment:
       APP_ENV: staging
       DEBUG: "false"
-      POSTGRES_USER: ${POSTGRES_USER:-payguard_staging_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payguard_staging_secure_password_98234}
-      POSTGRES_DB: ${POSTGRES_DB:-payguard_staging_db}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payguard_staging_user}:${POSTGRES_PASSWORD:-payguard_staging_secure_password_98234}@db:5432/${POSTGRES_DB:-payguard_staging_db}
-      SECRET_KEY: ${SECRET_KEY:-staging_payguard_secret_key_random_32_bytes_ok_9837}
+      POSTGRES_USER: ${STAGING_POSTGRES_USER:-payguard_staging_user}
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD:-payguard_staging_secure_password_98234}
+      POSTGRES_DB: ${STAGING_POSTGRES_DB:-payguard_staging_db}
+      DATABASE_URL: postgresql+asyncpg://${STAGING_POSTGRES_USER:-payguard_staging_user}:${STAGING_POSTGRES_PASSWORD:-payguard_staging_secure_password_98234}@db:5432/${STAGING_POSTGRES_DB:-payguard_staging_db}
+      SECRET_KEY: ${STAGING_SECRET_KEY:-staging_payguard_secret_key_random_32_bytes_ok_9837}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001}
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${STAGING_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2:1b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RATE_LIMIT_ENABLED: "true"
       MASK_PII_ENABLED: "true"
       PROMPT_INJECTION_DEFENSE_ENABLED: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend:/app/backend:ro
+      - ./alembic:/app/alembic:ro
+      - payguard_staging_storage:/app/storage
     ports:
       - "8000:8000"
     depends_on:
@@ -83,6 +95,9 @@ services:
 volumes:
   payguard_staging_pgdata:
     name: payguard_staging_pgdata
+    driver: local
+  payguard_staging_storage:
+    name: payguard_staging_storage
     driver: local
 
 networks:

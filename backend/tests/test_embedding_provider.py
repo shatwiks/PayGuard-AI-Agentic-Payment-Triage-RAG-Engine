@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from backend.app.services.embedding import (
+    EmbeddingModelRegistry,
+    EmbeddingModelSpec,
     EmbeddingProviderUnavailableException,
     EmbeddingValidationException,
     IEmbeddingProvider,
@@ -223,8 +225,8 @@ async def test_ollama_provider_dimension_padding():
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    # Simulate a 768-dim vector from nomic-embed-text
-    mock_resp.json.return_value = {"embedding": [0.01] * 768}
+    # Simulate a 768-dim vector from nomic-embed-text via /api/embed
+    mock_resp.json.return_value = {"embeddings": [[0.01] * 768]}
     mock_resp.raise_for_status = MagicMock()
 
     with patch("httpx.AsyncClient.post", return_value=mock_resp):
@@ -232,3 +234,190 @@ async def test_ollama_provider_dimension_padding():
         assert len(vec) == 1536
         assert vec[:768] == [0.01] * 768
         assert vec[768:] == [0.0] * 768
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_batch_embed_and_ordering():
+    provider = OllamaEmbeddingProvider(
+        base_url="http://127.0.0.1:11434",
+        model="nomic-embed-text",
+        dimension=1536,
+    )
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "embeddings": [
+            [0.1] * 768,
+            [0.2] * 768,
+            [0.3] * 768,
+        ]
+    }
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient.post", return_value=mock_resp):
+        batch = await provider.embed_batch(["text 1", "text 2", "text 3"])
+        assert len(batch) == 3
+        assert batch[0][:768] == [0.1] * 768
+        assert batch[1][:768] == [0.2] * 768
+        assert batch[2][:768] == [0.3] * 768
+        assert batch[0][768:] == [0.0] * 768
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_legacy_fallback():
+    provider = OllamaEmbeddingProvider(
+        base_url="http://127.0.0.1:11434",
+        model="nomic-embed-text",
+        dimension=1536,
+    )
+    # Simulate 404 on /api/embed then 200 on /api/embeddings
+    resp_404 = MagicMock()
+    resp_404.status_code = 404
+    resp_404.text = "404 page not found / endpoint not found"
+
+    resp_legacy = MagicMock()
+    resp_legacy.status_code = 200
+    resp_legacy.json.return_value = {"embedding": [0.05] * 768}
+    resp_legacy.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient.post", side_effect=[resp_404, resp_legacy]):
+        vecs = await provider.embed_batch(["legacy prompt"])
+        assert len(vecs) == 1
+        assert len(vecs[0]) == 1536
+        assert vecs[0][:768] == [0.05] * 768
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_missing_model_error():
+    provider = OllamaEmbeddingProvider(
+        base_url="http://127.0.0.1:11434",
+        model="nonexistent-model",
+    )
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_resp.text = '{"error":"model \'nonexistent-model\' not found"}'
+    error = httpx.HTTPStatusError("404 Not Found", request=MagicMock(), response=mock_resp)
+
+    with patch("httpx.AsyncClient.post", side_effect=error):
+        with pytest.raises(EmbeddingProviderUnavailableException, match="Ollama API error"):
+            await provider.embed_query("test query")
+
+
+def test_embedding_model_registry_resolution():
+    """Verify registry resolves standard models and unknown fallbacks correctly."""
+    spec_openai = EmbeddingModelRegistry.get_spec("text-embedding-3-small")
+    assert spec_openai.native_dimension == 1536
+    assert spec_openai.target_dimension == 1536
+
+    spec_nomic = EmbeddingModelRegistry.get_spec("nomic-embed-text:latest")
+    assert spec_nomic.native_dimension == 768
+    assert spec_nomic.target_dimension == 1536
+
+    spec_minilm = EmbeddingModelRegistry.get_spec("all-minilm")
+    assert spec_minilm.native_dimension == 384
+    assert spec_minilm.target_dimension == 1536
+
+    # Custom or unknown model
+    spec_custom = EmbeddingModelRegistry.get_spec("custom-embedding-model", target_dimension=1024)
+    assert spec_custom.native_dimension == 1024
+    assert spec_custom.target_dimension == 1024
+
+
+def test_embedding_model_spec_adaptation_and_padding():
+    """Verify automatic zero-padding from native to schema target dimension."""
+    spec = EmbeddingModelSpec(
+        model_name="test-768",
+        native_dimension=768,
+        target_dimension=1536,
+    )
+    raw_vec = [0.05] * 768
+    adapted = spec.adapt_vector(raw_vec)
+    assert len(adapted) == 1536
+    assert adapted[:768] == [0.05] * 768
+    assert adapted[768:] == [0.0] * 768
+
+    # Already matching target dimension
+    target_vec = [0.01] * 1536
+    assert spec.adapt_vector(target_vec) == target_vec
+
+
+def test_embedding_model_spec_l2_normalization():
+    """Verify optional L2 normalization normalizes vector before padding."""
+    spec = EmbeddingModelSpec(
+        model_name="test-normalized",
+        native_dimension=4,
+        target_dimension=8,
+        normalize_l2=True,
+    )
+    raw_vec = [3.0, 4.0, 0.0, 0.0]  # norm is 5.0
+    adapted = spec.adapt_vector(raw_vec)
+    assert len(adapted) == 8
+    assert adapted[:4] == [0.6, 0.8, 0.0, 0.0]
+    assert adapted[4:] == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_embedding_model_spec_validation_rejections():
+    """Verify rejection of invalid dimensions, empty inputs, NaNs, and Infs."""
+    spec = EmbeddingModelSpec(
+        model_name="test-spec",
+        native_dimension=4,
+        target_dimension=8,
+    )
+
+    # Empty
+    with pytest.raises(EmbeddingValidationException, match="Embedding dimension mismatch"):
+        spec.adapt_vector([])
+
+    # Dimension mismatch with both native and target
+    with pytest.raises(EmbeddingValidationException, match="expected 8, got 5"):
+        spec.adapt_vector([0.1, 0.2, 0.3, 0.4, 0.5])
+
+    # NaN rejection
+    with pytest.raises(EmbeddingValidationException, match="Invalid embedding value at index 2"):
+        spec.adapt_vector([0.1, 0.2, float("nan"), 0.4])
+
+    # Inf rejection
+    with pytest.raises(EmbeddingValidationException, match="Invalid embedding value at index 1"):
+        spec.adapt_vector([0.1, float("inf"), 0.3, 0.4])
+
+
+def test_embedding_model_spec_l2_normalization_at_target_dimension_and_truncation():
+    """Verify L2 normalization applies when input equals target_dimension and when truncating."""
+    spec_same = EmbeddingModelSpec(
+        model_name="test-same-dim-norm",
+        native_dimension=4,
+        target_dimension=4,
+        normalize_l2=True,
+    )
+    adapted_same = spec_same.adapt_vector([3.0, 4.0, 0.0, 0.0])
+    assert adapted_same == [0.6, 0.8, 0.0, 0.0]
+
+    spec_trunc = EmbeddingModelSpec(
+        model_name="test-trunc-norm",
+        native_dimension=6,
+        target_dimension=4,
+        normalize_l2=True,
+    )
+    adapted_trunc = spec_trunc.adapt_vector([3.0, 4.0, 0.0, 0.0, 99.0, 99.0])
+    assert adapted_trunc == [0.6, 0.8, 0.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_availability_ttl_cache():
+    """Verify OllamaEmbeddingProvider caches availability checks to avoid repeated blocking I/O."""
+    OllamaEmbeddingProvider.clear_availability_cache()
+    provider = OllamaEmbeddingProvider(base_url="http://127.0.0.1:11499")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    with patch("httpx.AsyncClient.get", return_value=mock_resp) as mock_async_get:
+        ok1 = await provider.check_availability_async()
+        assert ok1 is True
+        assert mock_async_get.call_count == 1
+
+    with patch("httpx.Client.get") as mock_sync_get:
+        # Should hit TTL cache without making a synchronous HTTP call
+        assert provider.is_available is True
+        assert mock_sync_get.call_count == 0
+
+    OllamaEmbeddingProvider.clear_availability_cache()

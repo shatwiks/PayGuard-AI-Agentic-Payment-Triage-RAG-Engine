@@ -294,6 +294,7 @@ export const api = {
     return request<InvestigationCase>("/investigations", {
       method: "POST",
       body: JSON.stringify(payload),
+      timeoutMs: 60000,
     });
   },
 
@@ -331,6 +332,7 @@ export const api = {
     return request<DocumentUploadResponse>("/knowledge/upload", {
       method: "POST",
       body: formData,
+      timeoutMs: 90000,
     });
   },
 
@@ -369,6 +371,7 @@ export const api = {
         top_k: payload.top_k ?? 5,
         retrieval_mode: payload.retrieval_mode ?? "hybrid",
       }),
+      timeoutMs: 60000,
     });
   },
 };

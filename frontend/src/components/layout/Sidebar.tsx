@@ -4,14 +4,16 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  ShieldAlert,
-  LayoutDashboard,
-  Search,
-  CreditCard,
-  BookOpen,
   Activity,
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  Compass,
+  CreditCard,
+  LayoutDashboard,
   PlusCircle,
-  Menu,
+  Search,
+  ShieldAlert,
   X,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -20,9 +22,16 @@ import { HealthResponse } from "@/lib/types";
 interface SidebarProps {
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
+  isCollapsed?: boolean;
+  setIsCollapsed?: (collapsed: boolean) => void;
 }
 
-export function Sidebar({ isOpen, setIsOpen }: SidebarProps) {
+export function Sidebar({
+  isOpen,
+  setIsOpen,
+  isCollapsed = false,
+  setIsCollapsed,
+}: SidebarProps) {
   const pathname = usePathname();
   const [health, setHealth] = useState<HealthResponse | null>(null);
 
@@ -69,52 +78,89 @@ export function Sidebar({ isOpen, setIsOpen }: SidebarProps) {
       {/* Mobile Backdrop */}
       {isOpen && (
         <div
-          className="fixed inset-0 z-40 bg-slate-900/40 md:hidden"
+          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-xs md:hidden"
           onClick={() => setIsOpen(false)}
+          aria-hidden="true"
         />
       )}
 
       <aside
-        className={`fixed top-0 bottom-0 left-0 z-50 w-64 bg-slate-900 text-slate-300 flex flex-col transition-transform duration-200 md:static md:translate-x-0 ${
+        aria-label="Workspace Sidebar Navigation"
+        className={`fixed top-0 bottom-0 left-0 z-50 bg-[#111519] border-r border-[#1F262E] text-[#9BA5B0] flex flex-col transition-all duration-200 md:static md:translate-x-0 ${
           isOpen ? "translate-x-0" : "-translate-x-full"
-        }`}
+        } ${isCollapsed ? "md:w-20" : "w-64"}`}
       >
-        {/* Logo and Brand */}
-        <div className="h-16 px-6 flex items-center justify-between border-b border-slate-800">
-          <Link href="/" className="flex items-center space-x-2.5">
-            <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-sm">
-              <ShieldAlert className="w-5 h-5" />
-            </div>
-            <div className="flex flex-col">
-              <span className="font-bold text-white tracking-tight text-base leading-none">
-                PayGuard <span className="text-blue-400 font-semibold text-xs">AI</span>
-              </span>
-              <span className="text-[10px] text-slate-400 tracking-wider uppercase font-medium mt-1">
-                Triage & RAG Console
-              </span>
-            </div>
-          </Link>
-          <button
-            onClick={() => setIsOpen(false)}
-            className="md:hidden text-slate-400 hover:text-white"
+        {/* Brand Header */}
+        <div className="h-16 px-4 flex items-center justify-between border-b border-[#1F262E]">
+          <Link
+            href="/"
+            className="flex items-center gap-2.5 min-w-0"
+            title="PayGuard AI Console"
           >
-            <X className="w-5 h-5" />
-          </button>
+            <div className="w-8 h-8 rounded-lg bg-[#171C21] border border-[#C6F36A]/45 flex items-center justify-center text-[#C6F36A] shrink-0">
+              <ShieldAlert className="w-4 h-4" />
+            </div>
+            {!isCollapsed && (
+              <div className="flex flex-col min-w-0">
+                <span className="font-bold text-[#F3F5F7] tracking-tight text-sm leading-none truncate">
+                  PayGuard{" "}
+                  <span className="text-[#C6F36A] font-mono text-[11px]">
+                    AI
+                  </span>
+                </span>
+                <span className="text-[10px] text-[#6E7A87] font-mono uppercase tracking-wider mt-1 truncate">
+                  Triage & RAG Engine
+                </span>
+              </div>
+            )}
+          </Link>
+
+          <div className="flex items-center gap-1">
+            {setIsCollapsed && (
+              <button
+                type="button"
+                onClick={() => setIsCollapsed(!isCollapsed)}
+                aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                className="hidden md:inline-flex p-1.5 rounded-lg text-[#6E7A87] hover:text-[#F3F5F7] hover:bg-[#171C21] transition"
+              >
+                {isCollapsed ? (
+                  <ChevronRight className="w-4 h-4" />
+                ) : (
+                  <ChevronLeft className="w-4 h-4" />
+                )}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsOpen(false)}
+              aria-label="Close mobile navigation"
+              className="md:hidden p-1.5 rounded-lg text-[#9BA5B0] hover:text-[#F3F5F7]"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
-        {/* Quick Action Button */}
-        <div className="p-4">
+        {/* Primary Action Button */}
+        <div className="p-3.5">
           <Link
             href="/investigations/new"
-            className="w-full flex items-center justify-center space-x-2 px-3 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-sm transition shadow-sm"
+            onClick={() => setIsOpen(false)}
+            title="New Investigation"
+            className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-[#C6F36A] hover:bg-[#D4F788] text-[#0B0D0F] font-semibold text-xs transition active:scale-[0.98] ${
+              isCollapsed ? "px-2" : ""
+            }`}
           >
-            <PlusCircle className="w-4 h-4" />
-            <span>New Investigation</span>
+            <PlusCircle className="w-4 h-4 shrink-0" />
+            {!isCollapsed && <span>New Investigation</span>}
           </Link>
         </div>
 
-        {/* Navigation Links */}
-        <nav className="flex-1 px-3 py-2 space-y-1 overflow-y-auto">
+        {/* Operational Navigation Links */}
+        <nav
+          aria-label="Operational navigation"
+          className="flex-1 px-3 py-2 space-y-1 overflow-y-auto"
+        >
           {navItems.map((item) => {
             const isActive = item.exact
               ? pathname === item.href
@@ -126,45 +172,79 @@ export function Sidebar({ isOpen, setIsOpen }: SidebarProps) {
                 key={item.href}
                 href={item.href}
                 onClick={() => setIsOpen(false)}
-                className={`flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium transition ${
+                title={item.label}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium transition ${
                   isActive
-                    ? "bg-slate-800 text-white border-l-2 border-blue-500"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
-                }`}
+                    ? "bg-[#171C21] text-[#F3F5F7] border border-[#262F38]"
+                    : "text-[#9BA5B0] hover:text-[#F3F5F7] hover:bg-[#171C21]/60 border border-transparent"
+                } ${isCollapsed ? "justify-center px-2" : ""}`}
               >
-                <Icon className={`w-4 h-4 ${isActive ? "text-blue-400" : "text-slate-400"}`} />
-                <span>{item.label}</span>
+                <Icon
+                  className={`w-4 h-4 shrink-0 ${
+                    isActive ? "text-[#C6F36A]" : "text-[#6E7A87]"
+                  }`}
+                />
+                {!isCollapsed && <span>{item.label}</span>}
               </Link>
             );
           })}
-        </nav>
 
-        {/* System Health / Telemetry Indicator */}
-        <div className="p-4 border-t border-slate-800 bg-slate-950/40">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-slate-400 flex items-center">
-              <Activity className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
-              API & RAG Engine
-            </span>
-            <span
-              className={`inline-flex items-center px-2 py-0.5 rounded-full font-mono text-[11px] ${
-                health?.status === "healthy"
-                  ? "bg-emerald-950/80 text-emerald-400 border border-emerald-800/60"
-                  : "bg-amber-950/80 text-amber-400 border border-amber-800/60"
+          <div className="pt-4 mt-4 border-t border-[#1F262E]">
+            <Link
+              href="/welcome"
+              onClick={() => setIsOpen(false)}
+              title="Platform Overview & Architecture"
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium text-[#6E7A87] hover:text-[#F3F5F7] hover:bg-[#171C21]/60 transition ${
+                isCollapsed ? "justify-center px-2" : ""
               }`}
             >
+              <Compass className="w-4 h-4 shrink-0 text-[#6E7A87]" />
+              {!isCollapsed && <span>Platform Overview</span>}
+            </Link>
+          </div>
+        </nav>
+
+        {/* System Health / Telemetry Footer */}
+        <div className="p-3.5 border-t border-[#1F262E] bg-[#0B0D0F]/60">
+          {isCollapsed ? (
+            <div
+              className="flex justify-center"
+              title={`Engine: ${health?.status || "checking"}`}
+            >
               <span
-                className={`w-1.5 h-1.5 rounded-full mr-1.5 ${
-                  health?.status === "healthy" ? "bg-emerald-400 animate-pulse" : "bg-amber-400"
+                className={`w-2.5 h-2.5 rounded-full ${
+                  health?.status === "healthy" ? "bg-[#2DD4BF]" : "bg-[#F59E0B]"
                 }`}
               />
-              {health ? health.status.toUpperCase() : "CHECKING"}
-            </span>
-          </div>
-          <div className="mt-2 text-[11px] text-slate-500 flex justify-between">
-            <span>DB: {health?.database || "ready"}</span>
-            <span>Vector: {health?.vector_store || "pgvector"}</span>
-          </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#9BA5B0] flex items-center text-[11px]">
+                  <Activity className="w-3.5 h-3.5 mr-1.5 text-[#6E7A87]" />
+                  API & RAG Engine
+                </span>
+                <span
+                  className={`inline-flex items-center px-2 py-0.5 rounded-md font-mono text-[10px] border ${
+                    health?.status === "healthy"
+                      ? "bg-[#2DD4BF]/10 text-[#2DD4BF] border-[#2DD4BF]/25"
+                      : "bg-[#F59E0B]/10 text-[#F59E0B] border-[#F59E0B]/25"
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full mr-1.5 ${
+                      health?.status === "healthy" ? "bg-[#2DD4BF]" : "bg-[#F59E0B]"
+                    }`}
+                  />
+                  {health ? health.status.toUpperCase() : "CHECKING"}
+                </span>
+              </div>
+              <div className="mt-2 text-[10px] font-mono text-[#6E7A87] flex justify-between">
+                <span>DB: {health?.database || "connected"}</span>
+                <span>Vector: {health?.vector_store || "pgvector"}</span>
+              </div>
+            </>
+          )}
         </div>
       </aside>
     </>

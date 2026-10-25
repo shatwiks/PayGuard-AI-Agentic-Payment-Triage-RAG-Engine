@@ -47,7 +47,9 @@ COPY --chown=payguard:payguard alembic.ini /app/alembic.ini
 COPY --chown=payguard:payguard backend /app/backend
 COPY --chown=payguard:payguard pyproject.toml /app/pyproject.toml
 
-RUN chmod +x /app/backend/docker-entrypoint.sh
+RUN mkdir -p /app/storage/uploads && \
+    chmod +x /app/backend/docker-entrypoint.sh && \
+    chown -R payguard:payguard /app
 
 USER payguard
 

@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
     OLLAMA_LLM_MODEL: str = "llama3.2:1b"
+    LLM_PROVIDER: str = "mock"
     RAG_TOP_K: int = 5
     RETRIEVAL_HYBRID_RRF_K: int = 60
     RETRIEVAL_LEXICAL_WEIGHT: float = 1.0
@@ -63,6 +64,12 @@ class Settings(BaseSettings):
     RATE_LIMIT_INVESTIGATIONS_PER_MINUTE: int = 40
     RATE_LIMIT_SEARCH_PER_MINUTE: int = 60
     RATE_LIMIT_UPLOAD_PER_MINUTE: int = 15
+    REDIS_URL: Optional[str] = None
+    RATE_LIMIT_REQUIRE_REDIS: Optional[bool] = None
+    TRUSTED_PROXIES: Union[str, List[str]] = [
+        "127.0.0.1",
+        "::1",
+    ]
     REQUEST_MAX_BODY_BYTES: int = 1_048_576  # 1 MB
     UPLOAD_MAX_FILE_SIZE_BYTES: int = 10_485_760  # 10 MB
     UPLOAD_ALLOWED_EXTENSIONS: List[str] = [".pdf", ".txt"]
@@ -82,6 +89,21 @@ class Settings(BaseSettings):
     @field_validator("BACKEND_CORS_ORIGINS", mode="after")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
+        if isinstance(v, str):
+            if v.startswith("[") and v.endswith("]"):
+                import json
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
+            return [i.strip() for i in v.split(",") if i.strip()]
+        elif isinstance(v, list):
+            return [str(i).strip() for i in v]
+        raise ValueError(v)
+
+    @field_validator("TRUSTED_PROXIES", mode="after")
+    @classmethod
+    def assemble_trusted_proxies(cls, v: Union[str, List[str]]) -> List[str]:
         if isinstance(v, str):
             if v.startswith("[") and v.endswith("]"):
                 import json

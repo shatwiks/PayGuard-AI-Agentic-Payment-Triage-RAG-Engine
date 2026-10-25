@@ -3,7 +3,7 @@
 Provides:
 1. Strict scope and document-level authorization enforcement (multi-tenant isolation).
 2. Retrieval of relevant hierarchical child chunks with parent context.
-3. Grounded answer generation using verified document excerpts.
+3. Grounded answer generation using verified document excerpts via EvidenceGroundingEngine.
 4. Clean abstention when requested facts are absent from the document.
 5. Exact citation attribution (document title, section, page number, chunk ID).
 6. Deterministic grounded fallback when live LLM provider is offline.
@@ -25,6 +25,7 @@ from backend.app.schemas.knowledge import (
     DocumentAskRequest,
     DocumentAskResponse,
 )
+from backend.app.services.grounding import EvidenceGroundingEngine, FinancialConstraintRegistry
 from backend.app.services.llm import LLMReasoningService
 from backend.app.services.retrieval import HybridRetrievalService
 
@@ -34,15 +35,24 @@ logger = logging.getLogger("payguard.document_qa")
 class DocumentQAService:
     """Answers user questions strictly grounded in authorized uploaded or system documents."""
 
+    _default_grounding_engine = EvidenceGroundingEngine()
+
     def __init__(
         self,
         session: AsyncSession,
         retrieval_service: Optional[HybridRetrievalService] = None,
         llm_service: Optional[LLMReasoningService] = None,
+        grounding_engine: Optional[EvidenceGroundingEngine] = None,
     ):
         self.session = session
         self.retrieval = retrieval_service or HybridRetrievalService(session=session)
         self.llm = llm_service or LLMReasoningService()
+        self.grounding_engine = grounding_engine or EvidenceGroundingEngine()
+
+    @property
+    def retrieval_service(self) -> HybridRetrievalService:
+        """Alias for self.retrieval."""
+        return self.retrieval
 
     async def _verify_and_resolve_scope(
         self,
@@ -142,6 +152,7 @@ class DocumentQAService:
                     section_title=r.section_title or r.section_header,
                     page_number=page_num,
                     excerpt=r.content,
+                    parent_excerpt=getattr(r, "parent_content", None),
                     score=score,
                 )
             )
@@ -160,10 +171,16 @@ class DocumentQAService:
             )
 
         # Grounded answer synthesis (Live LLM or Deterministic Grounded Engine)
-        answer, has_evidence = await self._synthesize_grounded_answer(
+        answer, has_evidence, best_excerpt = await self._synthesize_grounded_answer(
             query=request.query,
             cited_excerpts=cited_excerpts,
         )
+
+        ordered_excerpts = []
+        if has_evidence and best_excerpt:
+            ordered_excerpts = [best_excerpt] + [c for c in cited_excerpts if c.chunk_id != best_excerpt.chunk_id]
+        elif has_evidence:
+            ordered_excerpts = cited_excerpts
 
         citations = [
             {
@@ -174,7 +191,7 @@ class DocumentQAService:
                 "page": c.page_number,
                 "excerpt": c.excerpt,
             }
-            for c in cited_excerpts
+            for c in ordered_excerpts
         ] if has_evidence else []
 
         return DocumentAskResponse(
@@ -182,70 +199,40 @@ class DocumentQAService:
             answer=answer,
             has_sufficient_evidence=has_evidence,
             is_grounded=has_evidence,
-            cited_excerpts=cited_excerpts if has_evidence else [],
+            cited_excerpts=ordered_excerpts if has_evidence else [],
             citations=citations,
             retrieval_mode_used=search_res.retrieval_mode,
             embedding_status=active_embedding,
             scope_used=request.scope,
         )
 
+    # Class-level backward-compatible delegates to FinancialConstraintRegistry
+    _STOPWORDS = FinancialConstraintRegistry.STOPWORDS
+    _META_WORDS = FinancialConstraintRegistry.META_WORDS
+    _GENERIC_ATTRIBUTES = FinancialConstraintRegistry.GENERIC_ATTRIBUTES
+    _CURRENCIES = FinancialConstraintRegistry.CURRENCIES
+    _TOPIC_CONSTRAINTS = FinancialConstraintRegistry.TOPIC_CONSTRAINTS
+    _PAYMENT_RAILS = FinancialConstraintRegistry.PAYMENT_RAILS
+    _MODIFIER_PAIRS = FinancialConstraintRegistry.MODIFIER_PAIRS
+    _TIME_UNITS = FinancialConstraintRegistry.TIME_UNITS
+    _SYNONYM_CLUSTERS = FinancialConstraintRegistry.SYNONYM_CLUSTERS
+
+    # Class-level backward-compatible helper delegates to EvidenceGroundingEngine
+    _stem = staticmethod(EvidenceGroundingEngine.stem)
+    _tokenize_text = classmethod(lambda cls, text: EvidenceGroundingEngine.tokenize_text(text))
+    _extract_rule_ids = classmethod(lambda cls, tokens: EvidenceGroundingEngine.extract_rule_ids(tokens))
+
+    @classmethod
+    def _terms_match(cls, q_term: str, doc_tokens: Set[str], context_text: str) -> bool:
+        return cls._default_grounding_engine.terms_match(q_term, doc_tokens, context_text)
+
     async def _synthesize_grounded_answer(
         self,
         query: str,
         cited_excerpts: List[CitedExcerptItem],
-    ) -> Tuple[str, bool]:
-        """Synthesizes grounded answer or abstains if facts are absent."""
-        STOPWORDS = {
-            "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
-            "the", "and", "or", "for", "with", "does", "can", "should", "tell", "about",
-            "is", "are", "was", "were", "be", "been", "under", "in", "on", "at", "to",
-            "of", "from", "by", "as", "an", "a", "it", "its", "per", "that", "this"
-        }
-        query_words = [
-            w.lower()
-            for w in re.findall(r"\b[A-Za-z0-9_.-]{2,}\b", query)
-            if w.lower() not in STOPWORDS
-        ]
-
-        if not query_words:
-            query_words = [w.lower() for w in query.split() if len(w) > 1]
-
-        best_match_sentence = None
-        best_match_excerpt = None
-        max_matches = 0
-
-        # Scan excerpts for sentences matching query words (preserving decimal numbers like 12.50)
-        for exc in cited_excerpts:
-            sentences = [s.strip() for s in re.split(r"(?<!\d)\.(?!\d)\s*|\n+", exc.excerpt) if len(s.strip()) > 15]
-            for s in sentences:
-                s_lower = s.lower()
-                matches = sum(1 for w in query_words if w in s_lower)
-                if matches > max_matches:
-                    max_matches = matches
-                    best_match_sentence = s
-                    best_match_excerpt = exc
-
-        # Calculate coverage ratio
-        coverage_ratio = max_matches / len(query_words) if query_words else 0.0
-
-        # If evidence density or coverage ratio is too low (e.g. absent fact), abstain cleanly
-        if (
-            max_matches < 2
-            or (len(query_words) >= 4 and coverage_ratio < 0.55)
-            or not best_match_sentence
-            or not best_match_excerpt
-        ):
-            return (
-                f"The provided document does not contain sufficient information to answer the question: '{query}'.",
-                False,
-            )
-
-        # Build grounded citation
-        page_info = f", Page {best_match_excerpt.page_number}" if best_match_excerpt.page_number else ""
-        section_info = f"Section '{best_match_excerpt.section_title}'" if best_match_excerpt.section_title else "Document Body"
-
-        answer = (
-            f"Based on {best_match_excerpt.document_title} ({section_info}{page_info}):\n\n"
-            f"\"{best_match_sentence}.\""
+    ) -> Tuple[str, bool, Optional[CitedExcerptItem]]:
+        """Synthesizes grounded answer using the dedicated EvidenceGroundingEngine."""
+        return self.grounding_engine.synthesize_grounded_answer(
+            query=query,
+            cited_excerpts=cited_excerpts,
         )
-        return answer, True

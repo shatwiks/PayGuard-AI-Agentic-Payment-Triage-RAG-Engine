@@ -8,7 +8,7 @@ import React, {
   useCallback,
   Suspense,
 } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { api, getStoredToken, removeStoredToken } from "@/lib/api";
 import { User } from "@/lib/types";
 
@@ -17,14 +17,20 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (credentials: { email: string; password: string }) => Promise<void>;
-  register: (data: { email: string; password: string; full_name: string; role?: string }) => Promise<void>;
+  register: (data: {
+    email: string;
+    password: string;
+    full_name: string;
+    role?: string;
+  }) => Promise<void>;
   logout: () => void;
   refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const PUBLIC_ROUTES = ["/login", "/register"];
+const AUTH_ONLY_PUBLIC_ROUTES = ["/login", "/register"];
+const ALWAYS_PUBLIC_ROUTES = ["/welcome", "/privacy", "/terms"];
 
 function AuthNavigationWatcher({
   user,
@@ -34,18 +40,30 @@ function AuthNavigationWatcher({
   isLoading: boolean;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const router = useRouter();
 
   useEffect(() => {
     if (isLoading) return;
 
-    const isPublic = PUBLIC_ROUTES.some((route) => pathname.startsWith(route));
-    if (!user && !isPublic) {
+    const isAuthRoute = AUTH_ONLY_PUBLIC_ROUTES.some((route) =>
+      pathname.startsWith(route)
+    );
+    const isAlwaysPublic =
+      pathname === "/" ||
+      ALWAYS_PUBLIC_ROUTES.some((route) => pathname.startsWith(route));
+
+    if (!user && !isAuthRoute && !isAlwaysPublic) {
       router.push(`/login?redirect=${encodeURIComponent(pathname)}`);
-    } else if (user && isPublic) {
-      router.push("/");
+    } else if (user && isAuthRoute) {
+      const redirectParam = searchParams.get("redirect");
+      const safeRedirect =
+        redirectParam && redirectParam.startsWith("/") && !redirectParam.startsWith("//")
+          ? redirectParam
+          : "/";
+      router.push(safeRedirect);
     }
-  }, [user, isLoading, pathname, router]);
+  }, [user, isLoading, pathname, searchParams, router]);
 
   return null;
 }

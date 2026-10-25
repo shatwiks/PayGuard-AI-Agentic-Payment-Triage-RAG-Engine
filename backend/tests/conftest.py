@@ -1,18 +1,23 @@
 """Pytest configuration and async test fixtures for PayGuard AI."""
 
 import os
+import shutil
+import tempfile
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Set testing environment variables before importing app
+_test_upload_dir = tempfile.mkdtemp(prefix="payguard_test_uploads_")
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["SECRET_KEY"] = "test_super_secret_key_for_unit_tests_32chars"
 os.environ["MASK_PII_ENABLED"] = "true"
 os.environ["EMBEDDING_PROVIDER"] = "openai"
 os.environ["OPENAI_API_KEY"] = ""
+os.environ["UPLOAD_STORAGE_DIR"] = _test_upload_dir
 
+from backend.app.core.config import settings
 from backend.app.core.database import get_db
 from backend.app.main import app
 from backend.app.models.base import Base
@@ -45,8 +50,10 @@ TestingSessionLocal = async_sessionmaker(
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_env():
-    """Session setup."""
+    """Session setup: ensures upload storage is isolated to a temporary directory."""
+    settings.UPLOAD_STORAGE_DIR = _test_upload_dir
     yield
+    shutil.rmtree(_test_upload_dir, ignore_errors=True)
 
 
 @pytest.fixture

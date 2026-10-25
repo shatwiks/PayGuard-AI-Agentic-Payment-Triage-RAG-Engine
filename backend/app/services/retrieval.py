@@ -70,6 +70,14 @@ class SemanticSearchResult(NamedTuple):
 class HybridRetrievalService:
     """Combines PostgreSQL Full-Text Search (lexical) and pgvector cosine similarity (semantic) via RRF."""
 
+    _QUERY_STOPWORDS = frozenset({
+        "why", "is", "my", "the", "after", "without", "several", "when", "will",
+        "be", "on", "in", "to", "for", "of", "with", "has", "not", "their",
+        "was", "between", "and", "or", "how", "what", "where", "who", "which",
+        "can", "should", "would", "could", "from", "into", "that", "this",
+        "these", "those", "are", "does", "did", "have", "had", "been",
+    })
+
     def __init__(
         self,
         session: AsyncSession,
@@ -169,10 +177,27 @@ class HybridRetrievalService:
 
         if self._is_postgresql():
             import re
+            negated_capture = bool(
+                re.search(r"\b(without\s+captur\w*|not\s+captur\w*|un[-]?captur\w*)\b", search_query, re.IGNORECASE)
+            )
             raw_terms = [w.strip() for w in re.findall(r"\b[A-Za-z0-9_.-]{2,}\b", search_query) if w.isalnum()]
-            or_tsquery = " | ".join(raw_terms) if raw_terms else None
+            filtered_terms = [w for w in raw_terms if w.lower() not in self._QUERY_STOPWORDS]
+            if not filtered_terms:
+                filtered_terms = raw_terms
+            if negated_capture:
+                filtered_terms = [w for w in filtered_terms if not w.lower().startswith("captur")]
+                for exp_term in ("uncaptured", "holds", "expire"):
+                    if exp_term not in [t.lower() for t in filtered_terms]:
+                        filtered_terms.append(exp_term)
 
-            exact_q = func.plainto_tsquery("english", search_query)
+            or_tsquery = " | ".join(filtered_terms) if filtered_terms else None
+            effective_exact_query = (
+                re.sub(r"\b(without\s+captur\w*|not\s+captur\w*)\b", "uncaptured authorization holds expire", search_query, flags=re.IGNORECASE)
+                if negated_capture
+                else search_query
+            )
+
+            exact_q = func.plainto_tsquery("english", effective_exact_query)
 
             if or_tsquery:
                 or_q = func.to_tsquery("english", or_tsquery)
@@ -220,8 +245,19 @@ class HybridRetrievalService:
             for rank_idx, (chunk, score) in enumerate(rows, start=1):
                 results.append(LexicalSearchResult(chunk, rank_idx, float(score or 0.0)))
         else:
-            # Fallback for SQLite in-memory unit tests: word token match
-            terms = [w.lower() for w in search_query.split() if len(w) >= 1]
+            # Fallback for SQLite in-memory unit tests: word token match with stopword filtering & morphology
+            import re
+            negated_capture = bool(
+                re.search(r"\b(without\s+captur\w*|not\s+captur\w*|un[-]?captur\w*)\b", search_query, re.IGNORECASE)
+            )
+            raw_words = [re.sub(r"[^a-z0-9_.-]", "", w.lower()) for w in search_query.split()]
+            raw_words = [w for w in raw_words if len(w) >= 1]
+            terms = [w for w in raw_words if w not in self._QUERY_STOPWORDS] or raw_words
+            if negated_capture:
+                terms = [w for w in terms if not w.startswith("captur")]
+                for exp_term in ("uncaptured", "holds", "expire"):
+                    if exp_term not in terms:
+                        terms.append(exp_term)
             if not terms:
                 return []
 
@@ -259,8 +295,10 @@ class HybridRetrievalService:
 
             scored = []
             for chunk in chunks:
-                matches = sum(1 for t in terms if t in chunk.content.lower() or t in chunk.section_header.lower())
-                exact_boost = 1.0 if search_query.lower() in chunk.content.lower() else 0.0
+                c_low = chunk.content.lower()
+                h_low = (chunk.section_header or "").lower()
+                matches = sum(1 for t in terms if t in c_low or t in h_low)
+                exact_boost = 1.0 if search_query.lower() in c_low else 0.0
                 score = (matches / len(terms)) + exact_boost
                 scored.append((chunk, score))
 
@@ -298,7 +336,11 @@ class HybridRetrievalService:
         if query_vector is None:
             if not self.provider.is_available:
                 return []
-            query_vector = await self.provider.embed_query(query)
+            import re
+            effective_sem_query = query
+            if re.search(r"\b(without\s+captur\w*|not\s+captur\w*)\b", query, re.IGNORECASE):
+                effective_sem_query = f"{query} uncaptured authorization holds automatically expire business days"
+            query_vector = await self.provider.embed_query(effective_sem_query)
 
         results: List[SemanticSearchResult] = []
 
@@ -607,6 +649,10 @@ class HybridRetrievalService:
         items = results.results if isinstance(results, KnowledgeSearchResponse) else results
         citations = []
         for r in items:
+            is_synthetic = bool(
+                r.doc_type != "user_upload"
+                and (not r.source_id or not str(r.source_id).startswith("user://"))
+            )
             citations.append(
                 PolicyCitation(
                     document_title=r.title,
@@ -617,7 +663,7 @@ class HybridRetrievalService:
                     source_url=r.source_url,
                     document_id=r.document_id,
                     chunk_id=r.chunk_id,
-                    is_synthetic_demonstration=True,
+                    is_synthetic_demonstration=is_synthetic,
                 )
             )
         return citations

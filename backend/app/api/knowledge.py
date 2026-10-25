@@ -18,7 +18,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -216,6 +216,93 @@ async def get_document_details(
     )
 
 
+def _get_pending_deletes_manifest_path() -> str:
+    """Returns path to the durable write-ahead pending file deletion journal."""
+    os.makedirs(settings.UPLOAD_STORAGE_DIR, exist_ok=True)
+    return os.path.join(settings.UPLOAD_STORAGE_DIR, ".pending_deletes")
+
+
+def _record_pending_delete(storage_path: str) -> None:
+    """Records a file path in the durable pending-delete journal prior to DB commit."""
+    if not storage_path:
+        return
+    manifest_path = _get_pending_deletes_manifest_path()
+    existing: set[str] = set()
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                existing = {line.strip() for line in f if line.strip()}
+        except Exception:
+            pass
+    existing.add(storage_path)
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        for p in sorted(existing):
+            f.write(f"{p}\n")
+
+
+def _write_pending_deletes(paths: set[str]) -> None:
+    """Updates or removes the pending-delete journal file."""
+    manifest_path = _get_pending_deletes_manifest_path()
+    if not paths:
+        if os.path.exists(manifest_path):
+            try:
+                os.remove(manifest_path)
+            except Exception:
+                pass
+        return
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        for p in sorted(paths):
+            f.write(f"{p}\n")
+
+
+async def retry_pending_file_deletions(db: AsyncSession) -> List[str]:
+    """Reconciles and unlinks files in the pending-delete journal that have zero DB references.
+
+    Returns list of storage paths that were unlinked (or confirmed absent).
+    """
+    manifest_path = _get_pending_deletes_manifest_path()
+    if not os.path.exists(manifest_path):
+        return []
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            pending_paths = {line.strip() for line in f if line.strip()}
+    except Exception:
+        return []
+
+    if not pending_paths:
+        _write_pending_deletes(set())
+        return []
+
+    remaining_pending: set[str] = set()
+    cleaned_paths: List[str] = []
+
+    for path in sorted(pending_paths):
+        # Verify whether any document in DB still references this storage path
+        ref_stmt = select(func.count(KnowledgeDocument.id)).where(
+            KnowledgeDocument.storage_path == path
+        )
+        ref_count = (await db.execute(ref_stmt)).scalar_one_or_none() or 0
+        if ref_count > 0:
+            # File is still referenced by at least one document (e.g. shared file or rolled-back delete)
+            continue
+
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            cleaned_paths.append(path)
+        except Exception as e:
+            logger.warning(
+                "Deferred cleanup of '%s' failed (%s); retaining in .pending_deletes journal for retry.",
+                path,
+                e,
+            )
+            remaining_pending.add(path)
+
+    _write_pending_deletes(remaining_pending)
+    return cleaned_paths
+
+
 @router.delete(
     "/documents/{document_id}",
     status_code=status.HTTP_200_OK,
@@ -244,20 +331,30 @@ async def delete_document(
     if not doc.is_system and doc.uploaded_by_id != current_user.id and current_user.role != "admin":
         raise NotFoundException(f"Document '{document_id}' not found.")
 
-    # Remove storage file if exists
-    if doc.storage_path and os.path.exists(doc.storage_path):
+    storage_path = doc.storage_path
+    doc_title = doc.title
+
+    # 1. Record intent in durable pending-delete journal before DB commit
+    if storage_path:
+        _record_pending_delete(storage_path)
+
+    # 2. Execute DB deletion and commit FIRST
+    try:
+        await db.delete(doc)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        # Reconcile pending journal so rolled-back document's file is not left pending
         try:
-            os.remove(doc.storage_path)
-        except Exception as e:
-            logger.warning(
-                f"Failed to remove document file on disk at '{doc.storage_path}' during deletion of document '{doc.id}': {e}"
-            )
+            await retry_pending_file_deletions(db)
+        except Exception:
+            pass
+        raise
 
-    # Soft-delete or hard delete
-    await db.delete(doc)
-    await db.commit()
+    # 3. After DB commit succeeds, execute durable cleanup (checks shared references & unlinks)
+    await retry_pending_file_deletions(db)
 
-    return {"success": True, "message": f"Document '{doc.title}' deleted successfully."}
+    return {"success": True, "message": f"Document '{doc_title}' deleted successfully."}
 
 
 @router.post(

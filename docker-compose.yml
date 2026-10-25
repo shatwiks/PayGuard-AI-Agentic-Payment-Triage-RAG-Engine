@@ -1,3 +1,5 @@
+name: payguard-dev
+
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -35,11 +37,20 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payguard_user}:${POSTGRES_PASSWORD:-payguard_secure_password}@db:5432/${POSTGRES_DB:-payguard_db}
       SECRET_KEY: ${SECRET_KEY:-dev_secret_key_change_in_production_8f7b2a9e1d4c5e6f}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001}
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${DEV_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2:1b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RATE_LIMIT_ENABLED: "true"
       MASK_PII_ENABLED: "true"
       PROMPT_INJECTION_DEFENSE_ENABLED: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend:/app/backend:ro
+      - ./alembic:/app/alembic:ro
     ports:
       - "8000:8000"
     depends_on:

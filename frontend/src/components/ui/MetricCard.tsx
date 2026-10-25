@@ -1,6 +1,9 @@
+"use client";
+
 import React from "react";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
+import { AnimatedCounter } from "@/components/motion/MotionSystem";
 
 interface MetricCardProps {
   title: string;
@@ -8,7 +11,7 @@ interface MetricCardProps {
   description?: string;
   icon?: React.ReactNode;
   badge?: string;
-  badgeColor?: "green" | "amber" | "rose" | "blue" | "slate";
+  badgeColor?: "green" | "amber" | "rose" | "blue" | "slate" | "lime";
   href?: string;
   loading?: boolean;
 }
@@ -24,46 +27,72 @@ export function MetricCard({
   loading = false,
 }: MetricCardProps) {
   const badgeClasses = {
-    green: "bg-emerald-50 text-emerald-700 border-emerald-200",
-    amber: "bg-amber-50 text-amber-700 border-amber-200",
-    rose: "bg-rose-50 text-rose-700 border-rose-200",
-    blue: "bg-blue-50 text-blue-700 border-blue-200",
-    slate: "bg-slate-100 text-slate-700 border-slate-200",
+    green: "bg-[#2DD4BF]/10 text-[#2DD4BF] border-[#2DD4BF]/25",
+    amber: "bg-[#F59E0B]/10 text-[#F59E0B] border-[#F59E0B]/25",
+    rose: "bg-[#F87171]/10 text-[#F87171] border-[#F87171]/25",
+    blue: "bg-[#60A5FA]/10 text-[#60A5FA] border-[#60A5FA]/25",
+    lime: "bg-[#C6F36A]/10 text-[#C6F36A] border-[#C6F36A]/30",
+    slate: "bg-[#171C21] text-[#9BA5B0] border-[#262F38]",
   }[badgeColor];
 
+  const isNumericValue = typeof value === "number";
+
   const content = (
-    <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition-all">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-sm font-medium text-slate-500">{title}</span>
-        {icon && <div className="text-slate-400 p-2 bg-slate-50 rounded-lg">{icon}</div>}
-      </div>
-
-      <div className="flex items-baseline space-x-2">
-        {loading ? (
-          <div className="h-8 w-20 bg-slate-200 animate-pulse rounded" />
-        ) : (
-          <span className="text-2xl font-bold tracking-tight text-slate-900">{value}</span>
-        )}
-        {badge && (
-          <span className={`text-xs px-2 py-0.5 rounded-full font-medium border ${badgeClasses}`}>
-            {badge}
+    <div className="rounded-xl border border-[#1F262E] bg-[#111519] p-5 hover:border-[#333F4C] hover:bg-[#14191F] transition-colors duration-200 flex flex-col justify-between h-full">
+      <div>
+        <div className="flex items-center justify-between mb-3.5">
+          <span className="text-xs font-medium text-[#9BA5B0] tracking-tight">
+            {title}
           </span>
+          {icon && (
+            <div className="p-2 rounded-lg bg-[#171C21] border border-[#262F38] text-[#9BA5B0]">
+              {icon}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-baseline gap-2.5">
+          {loading ? (
+            <div
+              className="h-8 w-20 bg-[#171C21] animate-pulse rounded-md"
+              aria-label="Loading metric value"
+            />
+          ) : (
+            <span className="text-2xl font-bold tracking-tight text-[#F3F5F7] tabular-nums font-mono">
+              {isNumericValue ? <AnimatedCounter value={value} /> : value}
+            </span>
+          )}
+          {badge && (
+            <span
+              className={`text-[11px] font-mono px-2 py-0.5 rounded-md font-medium border ${badgeClasses}`}
+            >
+              {badge}
+            </span>
+          )}
+        </div>
+
+        {description && (
+          <p className="text-xs text-[#6E7A87] mt-2 leading-relaxed">
+            {description}
+          </p>
         )}
       </div>
-
-      {description && <p className="text-xs text-slate-500 mt-2">{description}</p>}
 
       {href && (
-        <div className="mt-3 pt-3 border-t border-slate-100 flex items-center text-xs font-medium text-blue-600 hover:text-blue-700">
-          <span>View records</span>
-          <ArrowUpRight className="w-3.5 h-3.5 ml-1" />
+        <div className="mt-4 pt-3 border-t border-[#1F262E] flex items-center justify-between text-xs font-medium text-[#9BA5B0] group-hover:text-[#C6F36A] transition-colors">
+          <span>Inspect records</span>
+          <ArrowUpRight className="w-3.5 h-3.5 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
         </div>
       )}
     </div>
   );
 
   if (href) {
-    return <Link href={href} className="block group">{content}</Link>;
+    return (
+      <Link href={href} className="block group h-full rounded-xl">
+        {content}
+      </Link>
+    );
   }
 
   return content;

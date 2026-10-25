@@ -1,4 +1,12 @@
 import React from "react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  RefreshCcw,
+  ShieldAlert,
+  XCircle,
+} from "lucide-react";
 
 interface StatusBadgeProps {
   status: string;
@@ -6,99 +14,120 @@ interface StatusBadgeProps {
   className?: string;
 }
 
-export function StatusBadge({ status, type = "case", className = "" }: StatusBadgeProps) {
+/**
+ * Semantic dark-fintech status indicator.
+ * Combines text + distinct iconography so status never relies solely on color (WCAG 2.2 AA).
+ */
+export function StatusBadge({
+  status,
+  type = "case",
+  className = "",
+}: StatusBadgeProps) {
   const norm = status.toLowerCase();
 
-  let bg = "bg-slate-100";
-  let text = "text-slate-700";
-  let border = "border-slate-200";
+  let bg = "bg-[#171C21]";
+  let text = "text-[#9BA5B0]";
+  let border = "border-[#262F38]";
+  let indicator: React.ReactNode = (
+    <span className="w-1.5 h-1.5 mr-1.5 rounded-full bg-current opacity-80" />
+  );
 
   if (type === "payment") {
     switch (norm) {
       case "captured":
       case "authorized":
-        bg = "bg-emerald-50";
-        text = "text-emerald-700";
-        border = "border-emerald-200";
+        bg = "bg-[#2DD4BF]/10";
+        text = "text-[#2DD4BF]";
+        border = "border-[#2DD4BF]/25";
+        indicator = <CheckCircle2 className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "pending":
-        bg = "bg-amber-50";
-        text = "text-amber-700";
-        border = "border-amber-200";
+        bg = "bg-[#F59E0B]/10";
+        text = "text-[#F59E0B]";
+        border = "border-[#F59E0B]/25";
+        indicator = <Clock className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "failed":
       case "disputed":
-        bg = "bg-rose-50";
-        text = "text-rose-700";
-        border = "border-rose-200";
+        bg = "bg-[#F87171]/10";
+        text = "text-[#F87171]";
+        border = "border-[#F87171]/30";
+        indicator = <XCircle className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "reversed":
       case "refunded":
-        bg = "bg-purple-50";
-        text = "text-purple-700";
-        border = "border-purple-200";
+        bg = "bg-[#60A5FA]/10";
+        text = "text-[#60A5FA]";
+        border = "border-[#60A5FA]/25";
+        indicator = <RefreshCcw className="w-3 h-3 mr-1 shrink-0" />;
         break;
     }
   } else if (type === "priority") {
     switch (norm) {
       case "urgent":
-        bg = "bg-red-50";
-        text = "text-red-700";
-        border = "border-red-200";
+        bg = "bg-[#F87171]/12";
+        text = "text-[#F87171]";
+        border = "border-[#F87171]/35";
+        indicator = <ShieldAlert className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "high":
-        bg = "bg-orange-50";
-        text = "text-orange-700";
-        border = "border-orange-200";
+        bg = "bg-[#F59E0B]/12";
+        text = "text-[#F59E0B]";
+        border = "border-[#F59E0B]/30";
+        indicator = <AlertTriangle className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "medium":
-        bg = "bg-blue-50";
-        text = "text-blue-700";
-        border = "border-blue-200";
+        bg = "bg-[#60A5FA]/10";
+        text = "text-[#60A5FA]";
+        border = "border-[#60A5FA]/25";
         break;
       case "low":
-        bg = "bg-slate-50";
-        text = "text-slate-600";
-        border = "border-slate-200";
+        bg = "bg-[#171C21]";
+        text = "text-[#9BA5B0]";
+        border = "border-[#262F38]";
         break;
     }
   } else {
     // case status: open, in_progress, triaged, escalated, closed
     switch (norm) {
       case "triaged":
-        bg = "bg-emerald-50";
-        text = "text-emerald-700";
-        border = "border-emerald-200";
+        bg = "bg-[#2DD4BF]/10";
+        text = "text-[#2DD4BF]";
+        border = "border-[#2DD4BF]/25";
+        indicator = <CheckCircle2 className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "in_progress":
-        bg = "bg-blue-50";
-        text = "text-blue-700";
-        border = "border-blue-200";
+        bg = "bg-[#60A5FA]/10";
+        text = "text-[#60A5FA]";
+        border = "border-[#60A5FA]/25";
+        indicator = <Clock className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "open":
-        bg = "bg-amber-50";
-        text = "text-amber-700";
-        border = "border-amber-200";
+        bg = "bg-[#F59E0B]/10";
+        text = "text-[#F59E0B]";
+        border = "border-[#F59E0B]/25";
+        indicator = <Clock className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "escalated":
-        bg = "bg-rose-50";
-        text = "text-rose-700";
-        border = "border-rose-200";
+        bg = "bg-[#F87171]/10";
+        text = "text-[#F87171]";
+        border = "border-[#F87171]/30";
+        indicator = <AlertTriangle className="w-3 h-3 mr-1 shrink-0" />;
         break;
       case "closed":
-        bg = "bg-slate-100";
-        text = "text-slate-600";
-        border = "border-slate-300";
+        bg = "bg-[#171C21]";
+        text = "text-[#9BA5B0]";
+        border = "border-[#262F38]";
         break;
     }
   }
 
   return (
     <span
-      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${bg} ${text} ${border} ${className}`}
+      className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-[11px] font-mono font-medium border ${bg} ${text} ${border} ${className}`}
     >
-      <span className="w-1.5 h-1.5 mr-1.5 rounded-full bg-current opacity-70" />
-      {status.toUpperCase().replace("_", " ")}
+      {indicator}
+      {status.toUpperCase().replace(/_/g, " ")}
     </span>
   );
 }

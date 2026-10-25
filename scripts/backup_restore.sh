@@ -23,7 +23,14 @@ case "${ACTION}" in
     echo "Database:  ${DB_NAME}"
     echo "Target:    ${BACKUP_FILE}"
 
-    docker exec -t "${CONTAINER_NAME}" pg_dump -Fc -U "${DB_USER}" -d "${DB_NAME}" > "${BACKUP_FILE}"
+    docker exec "${CONTAINER_NAME}" pg_dump -Fc -U "${DB_USER}" -d "${DB_NAME}" -f /tmp/backup_temp.dump
+    docker cp "${CONTAINER_NAME}:/tmp/backup_temp.dump" "${BACKUP_FILE}"
+    docker exec "${CONTAINER_NAME}" rm -f /tmp/backup_temp.dump
+
+    if [ ! -s "${BACKUP_FILE}" ]; then
+      echo "ERROR: Backup archive is missing or empty!"
+      exit 1
+    fi
     echo "-> Backup completed successfully: $(ls -lh "${BACKUP_FILE}")"
     ;;
 
@@ -36,8 +43,8 @@ case "${ACTION}" in
     BACKUP_FILE="$2"
     TARGET_DB="${3:-${DB_NAME}}"
 
-    if [ ! -f "${BACKUP_FILE}" ]; then
-      echo "ERROR: Backup file not found: ${BACKUP_FILE}"
+    if [ ! -s "${BACKUP_FILE}" ]; then
+      echo "ERROR: Valid non-empty backup file not found: ${BACKUP_FILE}"
       exit 1
     fi
 
@@ -49,9 +56,15 @@ case "${ACTION}" in
     # Copy dump into container
     docker cp "${BACKUP_FILE}" "${CONTAINER_NAME}:/tmp/restore_temp.dump"
 
-    # Restore with clean switch
-    docker exec -t "${CONTAINER_NAME}" pg_restore -U "${DB_USER}" -d "${TARGET_DB}" --clean --if-exists /tmp/restore_temp.dump
-    docker exec -t "${CONTAINER_NAME}" rm -f /tmp/restore_temp.dump
+    # Restore with clean switch and guarantee temp file cleanup
+    RESTORE_RC=0
+    docker exec "${CONTAINER_NAME}" pg_restore -U "${DB_USER}" -d "${TARGET_DB}" --clean --if-exists --no-owner --no-privileges /tmp/restore_temp.dump || RESTORE_RC=$?
+    docker exec "${CONTAINER_NAME}" rm -f /tmp/restore_temp.dump
+
+    if [ "${RESTORE_RC}" -ne 0 ]; then
+      echo "-> Restore failed with exit code ${RESTORE_RC}!"
+      exit "${RESTORE_RC}"
+    fi
 
     echo "-> Restore completed successfully into ${TARGET_DB}."
     ;;

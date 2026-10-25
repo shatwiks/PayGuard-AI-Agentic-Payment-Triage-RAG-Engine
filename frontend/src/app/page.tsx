@@ -11,10 +11,10 @@ import {
   CheckCircle2,
   AlertTriangle,
   Clock,
-  AlertCircle,
   FileText,
-  ExternalLink,
+  RefreshCw,
 } from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
 import { api, ApiError } from "@/lib/api";
 import { InvestigationCase, InvestigationMetrics } from "@/lib/types";
 import { MetricCard } from "@/components/ui/MetricCard";
@@ -22,12 +22,19 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ErrorAlert } from "@/components/ui/ErrorAlert";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { TableRowSkeleton } from "@/components/ui/LoadingSkeleton";
+import { LandingPage } from "@/components/landing/LandingPage";
+import { RevealSection } from "@/components/motion/MotionSystem";
 
 export default function DashboardPage() {
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [metrics, setMetrics] = useState<InvestigationMetrics | null>(null);
   const [recentCases, setRecentCases] = useState<InvestigationCase[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<{ message: string; code?: string; retryAfter?: number | null } | null>(null);
+  const [error, setError] = useState<{
+    message: string;
+    code?: string;
+    retryAfter?: number | null;
+  } | null>(null);
 
   const loadDashboardData = useCallback(async () => {
     setLoading(true);
@@ -57,31 +64,57 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    loadDashboardData();
-  }, [loadDashboardData]);
+    if (!authLoading && isAuthenticated) {
+      loadDashboardData();
+    }
+  }, [authLoading, isAuthenticated, loadDashboardData]);
+
+  // Unauthenticated visitors at `/` see the full Premium Fintech Landing Page
+  if (!authLoading && !isAuthenticated) {
+    return <LandingPage />;
+  }
+
+  const categoryEntries = metrics ? Object.entries(metrics.by_category) : [];
+  const maxCategoryCount =
+    categoryEntries.length > 0
+      ? Math.max(...categoryEntries.map(([, count]) => count), 1)
+      : 1;
 
   return (
     <div className="space-y-6">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Operations Overview</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Monitor real-time payment investigations, automated triage results, and dispute telemetry.
+          <h1 className="text-2xl font-bold tracking-tight text-[#F3F5F7]">
+            Operations Overview
+          </h1>
+          <p className="text-xs sm:text-sm text-[#9BA5B0] mt-1">
+            Monitor real-time payment investigations, deterministic triage classifications, and grounded RAG outcomes.
           </p>
         </div>
-        <div className="flex items-center space-x-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={loadDashboardData}
+            disabled={loading}
+            className="inline-flex items-center px-3 py-2 border border-[#262F38] rounded-xl text-xs font-medium text-[#9BA5B0] hover:text-[#F3F5F7] bg-[#111519] hover:bg-[#171C21] transition disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 mr-1.5 ${loading ? "animate-spin" : ""}`}
+            />
+            Refresh
+          </button>
           <Link
             href="/investigations"
-            className="inline-flex items-center px-3.5 py-2 border border-slate-300 rounded-lg text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 transition shadow-2xs"
+            className="inline-flex items-center px-3.5 py-2 border border-[#262F38] rounded-xl text-xs font-medium text-[#F3F5F7] bg-[#111519] hover:bg-[#171C21] transition"
           >
             All Cases
           </Link>
           <Link
             href="/investigations/new"
-            className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition shadow-xs"
+            className="inline-flex items-center px-4 py-2 rounded-xl text-xs font-semibold text-[#0B0D0F] bg-[#C6F36A] hover:bg-[#D4F788] transition active:scale-[0.98]"
           >
-            <Plus className="w-4 h-4 mr-1.5" />
+            <Plus className="w-3.5 h-3.5 mr-1.5" />
             New Investigation
           </Link>
         </div>
@@ -98,12 +131,12 @@ export default function DashboardPage() {
       )}
 
       {/* Genuine Backend Statistics */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <RevealSection className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard
           title="Total Investigations"
           value={metrics ? metrics.total_cases : 0}
           description="Recorded in authorized scope"
-          icon={<FileText className="w-5 h-5 text-blue-600" />}
+          icon={<FileText className="w-4 h-4 text-[#C6F36A]" />}
           loading={loading}
           href="/investigations"
         />
@@ -113,7 +146,7 @@ export default function DashboardPage() {
           description="Awaiting processing or review"
           badge="Active"
           badgeColor="amber"
-          icon={<Clock className="w-5 h-5 text-amber-600" />}
+          icon={<Clock className="w-4 h-4 text-[#F59E0B]" />}
           loading={loading}
           href="/investigations?status=open"
         />
@@ -123,7 +156,7 @@ export default function DashboardPage() {
           description="Autonomous RAG resolutions"
           badge="Completed"
           badgeColor="green"
-          icon={<CheckCircle2 className="w-5 h-5 text-emerald-600" />}
+          icon={<CheckCircle2 className="w-4 h-4 text-[#2DD4BF]" />}
           loading={loading}
           href="/investigations?status=triaged"
         />
@@ -133,34 +166,38 @@ export default function DashboardPage() {
           description="Requires human analyst sign-off"
           badge="High Priority"
           badgeColor="rose"
-          icon={<AlertTriangle className="w-5 h-5 text-rose-600" />}
+          icon={<AlertTriangle className="w-4 h-4 text-[#F87171]" />}
           loading={loading}
           href="/investigations?status=escalated"
         />
-      </div>
+      </RevealSection>
 
-      {/* Main Grid: Recent Investigations & Quick Actions */}
+      {/* Main Grid: Recent Investigations & Telemetry Breakdown */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Recent Investigations Table (2 Cols) */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+        <div className="lg:col-span-2 bg-[#111519] rounded-xl border border-[#1F262E] overflow-hidden flex flex-col">
+          <div className="px-6 py-4 border-b border-[#1F262E] flex items-center justify-between">
             <div>
-              <h2 className="text-base font-semibold text-slate-900">Recent Investigations</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Live transaction cases from backend database</p>
+              <h2 className="text-sm font-semibold text-[#F3F5F7]">
+                Recent Investigations
+              </h2>
+              <p className="text-xs text-[#6E7A87] mt-0.5">
+                Live transaction cases from PostgreSQL database
+              </p>
             </div>
             <Link
               href="/investigations"
-              className="text-xs font-medium text-blue-600 hover:text-blue-700 flex items-center"
+              className="text-xs font-medium text-[#C6F36A] hover:underline flex items-center"
             >
               <span>View all</span>
-              <ArrowRight className="w-3 h-3 ml-1" />
+              <ArrowRight className="w-3.5 h-3.5 ml-1" />
             </Link>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto flex-1">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="bg-slate-50/70 border-b border-slate-100 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                <tr className="bg-[#0B0D0F]/60 border-b border-[#1F262E] text-[11px] font-mono font-semibold text-[#6E7A87] uppercase tracking-wider">
                   <th className="py-3 px-4">Case #</th>
                   <th className="py-3 px-4">Payment Ref</th>
                   <th className="py-3 px-4">Triage Category</th>
@@ -169,7 +206,7 @@ export default function DashboardPage() {
                   <th className="py-3 px-4 text-right">Action</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 text-sm">
+              <tbody className="divide-y divide-[#1F262E] text-xs">
                 {loading ? (
                   <>
                     <TableRowSkeleton columns={6} />
@@ -179,10 +216,10 @@ export default function DashboardPage() {
                   </>
                 ) : recentCases.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8">
+                    <td colSpan={6} className="p-6">
                       <EmptyState
-                        title="No investigations yet"
-                        description="Start your first payment investigation to review automated evidence and RAG recommendations."
+                        title="No investigations recorded yet"
+                        description="Start your first payment investigation to review deterministic triage and grounded RAG citations."
                         actionText="Start Investigation"
                         actionHref="/investigations/new"
                       />
@@ -190,24 +227,29 @@ export default function DashboardPage() {
                   </tr>
                 ) : (
                   recentCases.map((c) => (
-                    <tr key={c.id} className="hover:bg-slate-50/60 transition">
-                      <td className="py-3 px-4 font-mono text-xs font-semibold text-slate-900">
+                    <tr
+                      key={c.id}
+                      className="hover:bg-[#171C21]/70 transition-colors"
+                    >
+                      <td className="py-3.5 px-4 font-mono text-xs font-semibold text-[#F3F5F7] tabular-nums">
                         {c.case_number}
                       </td>
-                      <td className="py-3 px-4 font-mono text-xs text-slate-600">
+                      <td className="py-3.5 px-4 font-mono text-xs text-[#9BA5B0] tabular-nums">
                         {c.payment?.payment_reference || "—"}
                       </td>
-                      <td className="py-3 px-4 text-xs font-medium text-slate-700">
+                      <td className="py-3.5 px-4 text-xs font-medium text-[#F3F5F7]">
                         {c.result?.issue_category ? (
-                          <span className="capitalize">{c.result.issue_category.replace("_", " ")}</span>
+                          <span className="capitalize">
+                            {c.result.issue_category.replace(/_/g, " ")}
+                          </span>
                         ) : (
-                          <span className="text-slate-400">Pending</span>
+                          <span className="text-[#6E7A87]">Pending</span>
                         )}
                       </td>
-                      <td className="py-3 px-4">
+                      <td className="py-3.5 px-4">
                         <StatusBadge status={c.status} type="case" />
                       </td>
-                      <td className="py-3 px-4 text-xs text-slate-500">
+                      <td className="py-3.5 px-4 text-xs text-[#9BA5B0] font-mono tabular-nums">
                         {new Date(c.created_at).toLocaleDateString(undefined, {
                           month: "short",
                           day: "numeric",
@@ -215,10 +257,10 @@ export default function DashboardPage() {
                           minute: "2-digit",
                         })}
                       </td>
-                      <td className="py-3 px-4 text-right">
+                      <td className="py-3.5 px-4 text-right">
                         <Link
                           href={`/investigations/${c.id}`}
-                          className="text-xs font-medium text-blue-600 hover:text-blue-800"
+                          className="text-xs font-semibold text-[#C6F36A] hover:underline"
                         >
                           Inspect &rarr;
                         </Link>
@@ -231,87 +273,126 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Quick Actions & Common Categories (1 Col) */}
+        {/* Right Column: Operational Shortcuts & Real Category Telemetry */}
         <div className="space-y-6">
           {/* Quick Actions Card */}
-          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-2xs">
-            <h2 className="text-sm font-semibold text-slate-900 mb-3">Operational Shortcuts</h2>
-            <div className="space-y-2">
+          <div className="bg-[#111519] rounded-xl border border-[#1F262E] p-5">
+            <h2 className="text-sm font-semibold text-[#F3F5F7] mb-3.5">
+              Operational Shortcuts
+            </h2>
+            <div className="space-y-2.5">
               <Link
                 href="/investigations/new"
-                className="flex items-center justify-between p-3 rounded-lg border border-slate-100 hover:border-slate-200 hover:bg-slate-50 transition group"
+                className="flex items-center justify-between p-3 rounded-xl border border-[#1F262E] bg-[#171C21]/50 hover:border-[#333F4C] hover:bg-[#171C21] transition group"
               >
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 rounded-lg bg-blue-50 text-blue-600">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-[#C6F36A]/10 border border-[#C6F36A]/25 text-[#C6F36A]">
                     <ShieldAlert className="w-4 h-4" />
                   </div>
                   <div>
-                    <h3 className="text-xs font-semibold text-slate-900">Run New Triage</h3>
-                    <p className="text-[11px] text-slate-500">Analyze failure code & policy</p>
+                    <h3 className="text-xs font-semibold text-[#F3F5F7]">
+                      Run New Triage
+                    </h3>
+                    <p className="text-[11px] text-[#6E7A87]">
+                      Analyze failure code & policy
+                    </p>
                   </div>
                 </div>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-600 transition" />
+                <ArrowRight className="w-3.5 h-3.5 text-[#6E7A87] group-hover:text-[#C6F36A] transition" />
               </Link>
 
               <Link
                 href="/payments"
-                className="flex items-center justify-between p-3 rounded-lg border border-slate-100 hover:border-slate-200 hover:bg-slate-50 transition group"
+                className="flex items-center justify-between p-3 rounded-xl border border-[#1F262E] bg-[#171C21]/50 hover:border-[#333F4C] hover:bg-[#171C21] transition group"
               >
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 rounded-lg bg-emerald-50 text-emerald-600">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-[#2DD4BF]/10 border border-[#2DD4BF]/25 text-[#2DD4BF]">
                     <Search className="w-4 h-4" />
                   </div>
                   <div>
-                    <h3 className="text-xs font-semibold text-slate-900">Search Payments</h3>
-                    <p className="text-[11px] text-slate-500">Find by reference or customer</p>
+                    <h3 className="text-xs font-semibold text-[#F3F5F7]">
+                      Search Payments
+                    </h3>
+                    <p className="text-[11px] text-[#6E7A87]">
+                      Find by reference or customer
+                    </p>
                   </div>
                 </div>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-emerald-600 transition" />
+                <ArrowRight className="w-3.5 h-3.5 text-[#6E7A87] group-hover:text-[#2DD4BF] transition" />
               </Link>
 
               <Link
                 href="/knowledge"
-                className="flex items-center justify-between p-3 rounded-lg border border-slate-100 hover:border-slate-200 hover:bg-slate-50 transition group"
+                className="flex items-center justify-between p-3 rounded-xl border border-[#1F262E] bg-[#171C21]/50 hover:border-[#333F4C] hover:bg-[#171C21] transition group"
               >
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 rounded-lg bg-purple-50 text-purple-600">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-[#60A5FA]/10 border border-[#60A5FA]/25 text-[#60A5FA]">
                     <BookOpen className="w-4 h-4" />
                   </div>
                   <div>
-                    <h3 className="text-xs font-semibold text-slate-900">Policy RAG Explorer</h3>
-                    <p className="text-[11px] text-slate-500">Hybrid search scheme rules</p>
+                    <h3 className="text-xs font-semibold text-[#F3F5F7]">
+                      Policy RAG Explorer
+                    </h3>
+                    <p className="text-[11px] text-[#6E7A87]">
+                      Hybrid search & grounded Q&A
+                    </p>
                   </div>
                 </div>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-purple-600 transition" />
+                <ArrowRight className="w-3.5 h-3.5 text-[#6E7A87] group-hover:text-[#60A5FA] transition" />
               </Link>
             </div>
           </div>
 
-          {/* Issue Categories Breakdown */}
-          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-2xs">
-            <h2 className="text-sm font-semibold text-slate-900 mb-2">Classified Categories</h2>
-            <p className="text-xs text-slate-500 mb-4">Grounded classifications from triage results</p>
+          {/* Issue Categories Breakdown (Real Backend Data Visualization) */}
+          <div className="bg-[#111519] rounded-xl border border-[#1F262E] p-5">
+            <div className="flex items-center justify-between mb-1">
+              <h2 className="text-sm font-semibold text-[#F3F5F7]">
+                Classified Categories
+              </h2>
+              <span className="text-[11px] font-mono text-[#6E7A87] tabular-nums">
+                {metrics ? `${metrics.total_cases} total` : ""}
+              </span>
+            </div>
+            <p className="text-xs text-[#6E7A87] mb-4">
+              Deterministic classifications from completed triage runs
+            </p>
 
             {loading ? (
-              <div className="space-y-2">
-                <div className="h-6 bg-slate-100 animate-pulse rounded" />
-                <div className="h-6 bg-slate-100 animate-pulse rounded" />
-              </div>
-            ) : metrics && Object.keys(metrics.by_category).length > 0 ? (
               <div className="space-y-3">
-                {Object.entries(metrics.by_category).map(([category, count]) => (
-                  <div key={category} className="flex items-center justify-between text-xs">
-                    <span className="capitalize font-medium text-slate-700">
-                      {category.replace("_", " ")}
-                    </span>
-                    <span className="font-mono bg-slate-100 px-2 py-0.5 rounded text-slate-600">
-                      {count}
-                    </span>
-                  </div>
-                ))}
+                <div className="h-6 bg-[#171C21] animate-pulse rounded-md" />
+                <div className="h-6 bg-[#171C21] animate-pulse rounded-md" />
+                <div className="h-6 bg-[#171C21] animate-pulse rounded-md" />
+              </div>
+            ) : categoryEntries.length > 0 ? (
+              <div className="space-y-3.5">
+                {categoryEntries.map(([category, count]) => {
+                  const pct = Math.round((count / maxCategoryCount) * 100);
+                  return (
+                    <div key={category} className="space-y-1.5">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="capitalize font-medium text-[#F3F5F7]">
+                          {category.replace(/_/g, " ")}
+                        </span>
+                        <span className="font-mono tabular-nums bg-[#171C21] border border-[#262F38] px-2 py-0.5 rounded text-[#C6F36A]">
+                          {count}
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 rounded-full bg-[#171C21] overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-[#C6F36A] transition-all duration-500"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
-              <p className="text-xs text-slate-400 italic">No triage categories recorded yet.</p>
+              <div className="py-6 text-center rounded-lg border border-dashed border-[#262F38] bg-[#0B0D0F]/50">
+                <p className="text-xs text-[#6E7A87]">
+                  No triage categories recorded in current scope yet.
+                </p>
+              </div>
             )}
           </div>
         </div>

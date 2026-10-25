@@ -2,9 +2,13 @@ import { test, expect } from '@playwright/test';
 
 test.describe('PayGuard AI E2E Browser Testing Suite', () => {
 
-  test('1. Protected Route: Unauthenticated access redirects to /login', async ({ page }) => {
-    // Navigate to root dashboard without auth
+  test('1. Protected Route & Entry Experience: Landing page CTA and unauthenticated route protection redirect to /login', async ({ page }) => {
+    // 1a. Root entry `/` displays the flagship landing experience for unauthenticated visitors
     await page.goto('/');
+    await expect(page.locator('text=AGENTIC PAYMENT TRIAGE & GROUNDED RAG')).toBeVisible();
+
+    // 1b. Navigating to a protected route without auth redirects to /login
+    await page.goto('/investigations');
     await expect(page).toHaveURL(/.*\/login/);
     await expect(page.locator('h2')).toContainText('Sign in to PayGuard AI');
   });
@@ -106,7 +110,7 @@ test.describe('PayGuard AI E2E Browser Testing Suite', () => {
     await page.click('button[type="submit"]:has-text("Start Investigation")');
 
     // Verify navigation to investigation detail page
-    await expect(page).toHaveURL(/.*\/investigations\/.+/, { timeout: 20000 });
+    await expect(page).toHaveURL(/.*\/investigations\/(?!new).+/, { timeout: 20000 });
 
     // Verify investigation results rendered
     await expect(page.locator('body')).toContainText('duplicate');
@@ -149,6 +153,68 @@ test.describe('PayGuard AI E2E Browser Testing Suite', () => {
     await expect(page).toHaveURL(/.*\/login/, { timeout: 10000 });
     const token = await page.evaluate(() => localStorage.getItem('payguard_access_token'));
     expect(token).toBeNull();
+  });
+
+  test('9. Landing Experience & Interactive Feature Slider: Next/Prev controls and keyboard navigation', async ({ page }) => {
+    await page.goto('/welcome');
+    await expect(page.locator('h1')).toContainText('Investigate payment failures');
+
+    // Verify interactive Feature Slider is visible
+    const sliderRegion = page.locator('[aria-roledescription="carousel"]');
+    await expect(sliderRegion).toBeVisible();
+    await expect(sliderRegion).toContainText('Multi-rail transaction lookup & gateway error correlation');
+
+    // Click Next slide button
+    await page.click('button[aria-label="Next capability slide"]');
+    await expect(sliderRegion).toContainText('Deterministic classification before generative synthesis');
+
+    // Keyboard ArrowRight navigation on slider
+    await sliderRegion.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(sliderRegion).toContainText('Reciprocal Rank Fusion over pgvector & PostgreSQL FTS');
+  });
+
+  test('10. Evidence Drawer: Clicking policy chunk opens slide-over citation inspector and closes on Escape', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('#email', 'agent@payguard.ai');
+    await page.fill('#password', 'Password123!');
+    await page.click('button[type="submit"]');
+    await expect(page).toHaveURL('http://localhost:3001/', { timeout: 15000 });
+
+    await page.goto('/knowledge');
+    const searchInput = page.locator('input[placeholder*="Query regulatory rules"]');
+    await searchInput.fill('Visa Condition 10.4 fraud dispute timeline 3D Secure');
+    await page.click('button[type="submit"]:has-text("Search RAG")');
+    await expect(page.locator('text=ranked policy chunks')).toBeVisible({ timeout: 15000 });
+
+    // Click Inspect button on first chunk to open EvidenceDrawer
+    await page.locator('button:has-text("Inspect")').first().click();
+    const drawer = page.locator('[role="dialog"][aria-labelledby="evidence-drawer-title"]');
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toContainText('Cited Verbatim Excerpt');
+
+    // Press Escape to close drawer
+    await page.keyboard.press('Escape');
+    await expect(drawer).toBeHidden();
+  });
+
+  test('11. Grounded Q&A & Document Management Tabs: Scope switching and upload dropzone', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('#email', 'agent@payguard.ai');
+    await page.fill('#password', 'Password123!');
+    await page.click('button[type="submit"]');
+    await expect(page).toHaveURL('http://localhost:3001/', { timeout: 15000 });
+
+    await page.goto('/knowledge');
+
+    // Switch to Grounded Q&A tab
+    await page.click('button[role="tab"]:has-text("Grounded Q&A")');
+    await expect(page.locator('text=Hallucination-Protected QA')).toBeVisible();
+
+    // Switch to Upload & Manage tab
+    await page.click('button[role="tab"]:has-text("Upload & Manage")');
+    await expect(page.locator('text=Upload Compliance Document')).toBeVisible();
+    await expect(page.locator('text=Click to choose a file')).toBeVisible();
   });
 
 });

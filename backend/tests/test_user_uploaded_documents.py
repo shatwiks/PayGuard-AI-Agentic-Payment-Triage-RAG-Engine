@@ -401,3 +401,173 @@ async def test_document_deletion_cleanup(client: AsyncClient, db_session: AsyncS
     )
     doc_record = doc_check.scalar_one_or_none()
     assert doc_record is None or doc_record.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_document_deletion_rollback_preserves_file(client: AsyncClient, db_session: AsyncSession):
+    """Verify that if the database transaction fails/rolls back, the storage file on disk is NOT deleted."""
+    from unittest.mock import patch
+
+    _, token = await create_test_user_and_token(db_session, "rollback_user@payguard.ai")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    upload_res = await client.post(
+        "/api/v1/knowledge/upload",
+        headers=headers,
+        files={"file": ("rollback_doc.txt", b"Content that must survive a rollback.", "text/plain")},
+    )
+    assert upload_res.status_code == 201
+    doc_id = upload_res.json()["id"]
+
+    doc = await db_session.get(KnowledgeDocument, uuid.UUID(doc_id))
+    assert doc is not None
+    storage_path = doc.storage_path
+    assert storage_path is not None
+    assert os.path.exists(storage_path)
+
+    # Simulate DB failure during commit
+    with patch("sqlalchemy.ext.asyncio.AsyncSession.commit", side_effect=RuntimeError("Simulated DB commit error")):
+        try:
+            await client.delete(f"/api/v1/knowledge/documents/{doc_id}", headers=headers)
+        except RuntimeError:
+            pass
+
+    # File on disk must still exist because DB commit did not succeed!
+    assert os.path.exists(storage_path)
+
+
+@pytest.mark.asyncio
+async def test_document_deletion_missing_file_succeeds_gracefully(client: AsyncClient, db_session: AsyncSession):
+    """Verify that deleting a document whose physical file is missing succeeds without a 500 error."""
+    _, token = await create_test_user_and_token(db_session, "missing_file_user@payguard.ai")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    upload_res = await client.post(
+        "/api/v1/knowledge/upload",
+        headers=headers,
+        files={"file": ("missing_doc.txt", b"File that will be removed prematurely.", "text/plain")},
+    )
+    assert upload_res.status_code == 201
+    doc_id = upload_res.json()["id"]
+
+    doc = await db_session.get(KnowledgeDocument, uuid.UUID(doc_id))
+    storage_path = doc.storage_path
+    assert storage_path is not None and os.path.exists(storage_path)
+
+    # Remove the file manually before calling delete
+    os.remove(storage_path)
+    assert not os.path.exists(storage_path)
+
+    # DELETE must succeed gracefully
+    del_res = await client.delete(f"/api/v1/knowledge/documents/{doc_id}", headers=headers)
+    assert del_res.status_code == 200
+
+    doc_after = await db_session.get(KnowledgeDocument, uuid.UUID(doc_id))
+    assert doc_after is None
+
+
+@pytest.mark.asyncio
+async def test_document_deletion_shared_file_preserves_disk_file(client: AsyncClient, db_session: AsyncSession):
+    """Verify that deleting a document does not remove the storage file if another active document shares the same path."""
+    user, token = await create_test_user_and_token(db_session, "shared_user@payguard.ai")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    upload_res = await client.post(
+        "/api/v1/knowledge/upload",
+        headers=headers,
+        files={"file": ("shared_base.txt", b"Shared underlying policy content.", "text/plain")},
+    )
+    assert upload_res.status_code == 201
+    doc_1_id = upload_res.json()["id"]
+
+    doc_1 = await db_session.get(KnowledgeDocument, uuid.UUID(doc_1_id))
+    storage_path = doc_1.storage_path
+    assert storage_path is not None and os.path.exists(storage_path)
+
+    # Create document 2 sharing the exact same storage_path
+    doc_2_id = uuid.uuid4()
+    doc_2 = KnowledgeDocument(
+        id=doc_2_id,
+        title="Shared Alias Document",
+        doc_type="user_upload",
+        version="1.0",
+        source_id=f"user://upload/{doc_2_id}",
+        content_hash=doc_1.content_hash,
+        raw_content=doc_1.raw_content,
+        is_active=True,
+        uploaded_by_id=user.id,
+        is_system=False,
+        file_name="shared_alias.txt",
+        file_size_bytes=doc_1.file_size_bytes,
+        mime_type=doc_1.mime_type,
+        storage_path=storage_path,
+        chunk_count=0,
+    )
+    db_session.add(doc_2)
+    await db_session.commit()
+
+    # Delete doc 1 -> Must delete doc 1, but keep disk file intact because doc 2 is active!
+    del_1_res = await client.delete(f"/api/v1/knowledge/documents/{doc_1_id}", headers=headers)
+    assert del_1_res.status_code == 200
+    assert os.path.exists(storage_path), "Storage file was removed even though doc_2 still references it!"
+
+    # Now delete doc 2 -> File must now be removed because no active references remain
+    del_2_res = await client.delete(f"/api/v1/knowledge/documents/{doc_2_id}", headers=headers)
+    assert del_2_res.status_code == 200
+    assert not os.path.exists(storage_path), "Storage file should be cleaned up after all referencing docs are deleted!"
+
+
+@pytest.mark.asyncio
+async def test_document_deletion_post_commit_failure_and_durable_recovery(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """Verify that if file unlinking fails or crashes after DB commit, the path is retained in .pending_deletes and cleaned up on retry."""
+    from unittest.mock import patch
+    from backend.app.api.knowledge import (
+        _get_pending_deletes_manifest_path,
+        retry_pending_file_deletions,
+    )
+
+    _, token = await create_test_user_and_token(db_session, "post_commit_crash@payguard.ai")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    upload_res = await client.post(
+        "/api/v1/knowledge/upload",
+        headers=headers,
+        files={"file": ("post_commit_crash.txt", b"Content surviving post-commit unlink error.", "text/plain")},
+    )
+    assert upload_res.status_code == 201
+    doc_id = upload_res.json()["id"]
+
+    doc = await db_session.get(KnowledgeDocument, uuid.UUID(doc_id))
+    assert doc is not None
+    storage_path = doc.storage_path
+    assert storage_path is not None and os.path.exists(storage_path)
+
+    real_os_remove = os.remove
+
+    def fail_unlink_for_target(path: str):
+        if os.path.normpath(path) == os.path.normpath(storage_path):
+            raise PermissionError("Simulated transient OS file lock after DB commit")
+        return real_os_remove(path)
+
+    # 1. Delete document while os.remove fails after DB commit
+    with patch("backend.app.api.knowledge.os.remove", side_effect=fail_unlink_for_target):
+        del_res = await client.delete(f"/api/v1/knowledge/documents/{doc_id}", headers=headers)
+        assert del_res.status_code == 200
+
+    # DB record is committed as deleted, file still exists on disk, and .pending_deletes retains the path
+    db_session.expire_all()
+    assert await db_session.get(KnowledgeDocument, uuid.UUID(doc_id)) is None
+    assert os.path.exists(storage_path)
+    manifest_path = _get_pending_deletes_manifest_path()
+    assert os.path.exists(manifest_path)
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        pending_entries = [line.strip() for line in f if line.strip()]
+    assert storage_path in pending_entries
+
+    # 2. Now that the transient failure has passed, retry_pending_file_deletions unlinks the file and clears the journal
+    cleaned = await retry_pending_file_deletions(db_session)
+    assert storage_path in cleaned
+    assert not os.path.exists(storage_path)
+    assert not os.path.exists(manifest_path)

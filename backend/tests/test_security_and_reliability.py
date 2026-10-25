@@ -673,3 +673,284 @@ async def test_health_check_sanitization(client: AsyncClient):
     assert "postgresql://" not in resp_str
     assert "password" not in resp_str
     assert "secret" not in resp_str
+
+
+# ---------------------------------------------------------------------------
+# 22. Rate Limiter JWT Digest Isolation & Stale Key Pruning
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_rate_limiter_jwt_digest_isolation_and_pruning():
+    """Verifies that two distinct users behind the same IP get isolated rate limit buckets via SHA-256 token digest."""
+    from fastapi import HTTPException
+    from backend.app.core.rate_limit import SlidingWindowRateLimiter, limiter, rate_limit
+
+    limiter.reset()
+    token_user_1 = create_access_token(subject=uuid.uuid4(), role="support_agent")
+    token_user_2 = create_access_token(subject=uuid.uuid4(), role="support_agent")
+
+    dep = rate_limit("test_action", max_requests=1, window_seconds=60)
+
+    def _make_req(token: str):
+        req = MagicMock()
+        req.client.host = "10.0.0.1"
+        req.headers = {"Authorization": f"Bearer {token}"}
+        return req
+
+    with patch("backend.app.core.rate_limit.settings.RATE_LIMIT_ENABLED", True):
+        # First user hits limit of 1
+        await dep(_make_req(token_user_1))
+        with pytest.raises(HTTPException) as exc_info:
+            await dep(_make_req(token_user_1))
+        assert exc_info.value.status_code == 429
+
+        # Second user from same IP has distinct JWT digest -> permitted
+        await dep(_make_req(token_user_2))
+
+    limiter.reset()
+
+    # Verify stale key pruning does not re-insert empty lists
+    custom_limiter = SlidingWindowRateLimiter()
+    custom_limiter._timestamps["expired_key"] = [1.0]
+    allowed, _, _ = custom_limiter.is_allowed("expired_key", max_requests=5, window_seconds=60)
+    assert allowed is True
+    assert len(custom_limiter._timestamps["expired_key"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_client_ip_extraction_trusted_proxy_and_anti_spoofing():
+    """Verifies that X-Forwarded-For is only honored from trusted reverse proxies and spoofed headers cannot bypass rate limits."""
+    from fastapi import HTTPException
+    from backend.app.core.rate_limit import extract_client_ip, limiter, rate_limit
+
+    # Untrusted peer trying to spoof client IP
+    untrusted_req = MagicMock()
+    untrusted_req.client.host = "198.51.100.25"  # Public untrusted client
+    untrusted_req.headers = {"X-Forwarded-For": "203.0.113.195"}
+    extracted_ip = extract_client_ip(untrusted_req, trusted_proxies=["127.0.0.1", "10.0.0.1"])
+    assert extracted_ip == "198.51.100.25"  # Spoofed header strictly ignored
+
+    # Trusted proxy forwarding single client IP
+    trusted_req = MagicMock()
+    trusted_req.client.host = "127.0.0.1"  # Local reverse proxy
+    trusted_req.headers = {"X-Forwarded-For": "203.0.113.195"}
+    extracted_ip = extract_client_ip(trusted_req, trusted_proxies=["127.0.0.1", "10.0.0.1"])
+    assert extracted_ip == "203.0.113.195"
+
+    # Trusted proxy forwarding multiple chain IPs (leftmost is original client)
+    multi_hop_req = MagicMock()
+    multi_hop_req.client.host = "10.0.0.1"
+    multi_hop_req.headers = {"X-Forwarded-For": "198.51.100.42, 10.0.0.2"}
+    extracted_ip = extract_client_ip(multi_hop_req, trusted_proxies=["127.0.0.1", "10.0.0.1"])
+    assert extracted_ip == "198.51.100.42"
+
+    # Missing client object fallback
+    no_client_req = MagicMock()
+    no_client_req.client = None
+    no_client_req.headers = {}
+    assert extract_client_ip(no_client_req) == "127.0.0.1"
+
+    # End-to-end anti-spoofing in rate_limit dependency: rotating X-Forwarded-For from untrusted peer still hits 429
+    limiter.reset()
+    dep = rate_limit("login_spoof_test", max_requests=1, window_seconds=60)
+    with patch("backend.app.core.rate_limit.settings.RATE_LIMIT_ENABLED", True), \
+         patch("backend.app.core.rate_limit.settings.TRUSTED_PROXIES", ["127.0.0.1"]):
+        req1 = MagicMock()
+        req1.client.host = "198.51.100.99"
+        req1.headers = {"X-Forwarded-For": "1.1.1.1"}
+        await dep(req1)
+
+        req2 = MagicMock()
+        req2.client.host = "198.51.100.99"
+        req2.headers = {"X-Forwarded-For": "2.2.2.2"}  # Attacker rotates spoofed IP
+        with pytest.raises(HTTPException) as exc_info:
+            await dep(req2)
+        assert exc_info.value.status_code == 429
+    limiter.reset()
+
+
+@pytest.mark.asyncio
+async def test_redis_rate_limiter_sliding_window_and_fallback():
+    """Verifies Redis success, Redis failure (dev fallback vs production fail-closed), and window expiration."""
+    import time
+    from fastapi import HTTPException
+    from backend.app.core.rate_limit import (
+        RateLimitBackendUnavailableError,
+        RedisSlidingWindowRateLimiter,
+        SlidingWindowRateLimiter,
+        get_rate_limiter,
+        rate_limit,
+    )
+
+    # 1. Development fallback (allow_fallback=True) when Redis server is unreachable
+    unreachable_limiter = RedisSlidingWindowRateLimiter(
+        "redis://invalid-host-unreachable:6379/0",
+        allow_fallback=True,
+    )
+    allowed, remaining, _ = unreachable_limiter.is_allowed("test_key", max_requests=2, window_seconds=60)
+    assert allowed is True
+    assert remaining == 1
+    allowed, remaining, _ = unreachable_limiter.is_allowed("test_key", max_requests=2, window_seconds=60)
+    assert allowed is True
+    assert remaining == 0
+    allowed, remaining, retry_after = unreachable_limiter.is_allowed("test_key", max_requests=2, window_seconds=60)
+    assert allowed is False
+    assert retry_after > 0
+
+    # 2. Production fail-safe policy (allow_fallback=False): must NOT silently weaken protection
+    strict_limiter = RedisSlidingWindowRateLimiter(
+        "redis://invalid-host-unreachable:6379/0",
+        allow_fallback=False,
+    )
+    with pytest.raises(RateLimitBackendUnavailableError):
+        strict_limiter.is_allowed("prod_key", max_requests=10, window_seconds=60)
+
+    # Production without REDIS_URL configured fails safely with 503
+    dep = rate_limit("prod_action", max_requests=5, window_seconds=60)
+    req = MagicMock()
+    req.client.host = "127.0.0.1"
+    req.headers = {}
+    with patch("backend.app.core.rate_limit.settings.RATE_LIMIT_ENABLED", True), \
+         patch("backend.app.core.rate_limit.settings.APP_ENV", "production"), \
+         patch("backend.app.core.rate_limit.settings.RATE_LIMIT_REQUIRE_REDIS", None), \
+         patch("backend.app.core.rate_limit.settings.REDIS_URL", None):
+        with pytest.raises( RateLimitBackendUnavailableError ):
+            get_rate_limiter()
+        with pytest.raises(HTTPException) as exc_info:
+            await dep(req)
+        assert exc_info.value.status_code == 503
+
+    # Production with REDIS_URL configured but unreachable fails safely with 503
+    with patch("backend.app.core.rate_limit.settings.RATE_LIMIT_ENABLED", True), \
+         patch("backend.app.core.rate_limit.settings.APP_ENV", "production"), \
+         patch("backend.app.core.rate_limit.settings.RATE_LIMIT_REQUIRE_REDIS", True), \
+         patch("backend.app.core.rate_limit.settings.REDIS_URL", "redis://invalid-host-unreachable:6379/0"):
+        with pytest.raises(HTTPException) as exc_info:
+            await dep(req)
+        assert exc_info.value.status_code == 503
+
+    # 3. Redis limiter success and rate limit enforcement with active client
+    mock_redis = MagicMock()
+    limiter_with_redis = RedisSlidingWindowRateLimiter("redis://127.0.0.1:6379/0", allow_fallback=False)
+    limiter_with_redis._redis_client = mock_redis
+
+    # First request: 0 existing in window
+    mock_pipe1 = MagicMock()
+    mock_pipe1.execute.return_value = [0, 0, []]
+    mock_pipe2 = MagicMock()
+    mock_pipe2.execute.return_value = [True, True]
+    mock_redis.pipeline.side_effect = [mock_pipe1, mock_pipe2]
+
+    allowed, rem, _ = limiter_with_redis.is_allowed("mock_user", max_requests=3, window_seconds=60)
+    assert allowed is True
+    assert rem == 2
+
+    # Exceeded request: 3 existing in window
+    mock_pipe_full = MagicMock()
+    now_ts = time.time()
+    mock_pipe_full.execute.return_value = [0, 3, [("entry", now_ts - 20)]]
+    mock_redis.pipeline.side_effect = [mock_pipe_full]
+
+    allowed, rem, retry_after = limiter_with_redis.is_allowed("mock_user", max_requests=3, window_seconds=60)
+    assert allowed is False
+    assert rem == 0
+    assert 39 <= retry_after <= 41
+
+    # 4. Window expiration: once window elapses, requests are allowed again
+    mem_limiter = SlidingWindowRateLimiter()
+    allowed1, _, _ = mem_limiter.is_allowed("exp_user", max_requests=1, window_seconds=1)
+    assert allowed1 is True
+    allowed2, _, _ = mem_limiter.is_allowed("exp_user", max_requests=1, window_seconds=1)
+    assert allowed2 is False
+    # Age out timestamp beyond 1s window
+    mem_limiter._timestamps["exp_user"] = [time.time() - 2.0]
+    allowed3, rem3, _ = mem_limiter.is_allowed("exp_user", max_requests=1, window_seconds=1)
+    assert allowed3 is True
+    assert rem3 == 0
+
+
+# ---------------------------------------------------------------------------
+# 23. Ollama LLM Provider & Duplicate Upload Status Preservation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_llm_reasoning_service_ollama_provider():
+    """Verifies LLMReasoningService routes to local Ollama /api/chat when provider='ollama'."""
+    service = LLMReasoningService(
+        provider="ollama",
+        model_name="llama3.2:1b",
+        ollama_base_url="http://127.0.0.1:11434",
+    )
+    assert service.is_live_ollama is True
+    assert service.is_live_provider is True
+
+    triage = TriageClassificationResult(
+        category="failed_payment",
+        confidence_score=0.92,
+        rule_id_matched="RULE_ACH_R01",
+        recommended_action="retry_payment",
+        recommended_action_details="Re-initiate debit within 180 days.",
+        supporting_record_ids=["Return Code R01"],
+        missing_fields=[],
+        conflicting_evidence=[],
+        is_ambiguous=False,
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "message": {
+            "content": json.dumps({
+                "investigation_summary": "Verified ACH R01 insufficient funds return.",
+                "likely_cause": "Insufficient account balance",
+                "recommended_action": "retry_payment",
+                "recommended_action_details": "Re-initiate up to twice within 180 days.",
+                "missing_or_conflicting_info": [],
+                "human_review_required": False,
+                "human_review_reason": None,
+            })
+        }
+    }
+
+    with patch("httpx.AsyncClient.post", return_value=mock_resp):
+        out = await service.generate_investigation_summary(
+            user_query="Why did ACH debit fail with R01?",
+            payment=None,
+            citations=[],
+            triage_result=triage,
+        )
+        assert out.generation_mode == "llm_ollama"
+        assert "Verified ACH R01" in out.investigation_summary
+
+
+@pytest.mark.asyncio
+async def test_duplicate_upload_preserves_embedded_status(db_session: AsyncSession, test_users: dict):
+    """Verifies that re-uploading an identical file returns embeddings_generated=True when status is 'embedded'."""
+    from backend.app.services.embedding import MockEmbeddingProvider
+    from backend.app.services.ingestion import DocumentIngestionPipeline
+
+    agent_a = test_users["agent_a"]
+    provider = MockEmbeddingProvider(dimension=1536, available=True)
+    ingestion = DocumentIngestionPipeline(session=db_session, embedding_provider=provider)
+
+    content_bytes = b"Section 1.1: Duplicate upload test policy content with sufficient length for chunking."
+    res1 = await ingestion.ingest_user_uploaded_file(
+        user_id=agent_a.id,
+        file_bytes=content_bytes,
+        filename="dup_policy_test.txt",
+        mime_type="text/plain",
+        title="Duplicate Policy Test",
+    )
+    assert res1.embeddings_generated is True
+    assert res1.document.embedding_status == "embedded"
+
+    # Re-upload identical file -> duplicate check must report embeddings_generated=True
+    res2 = await ingestion.ingest_user_uploaded_file(
+        user_id=agent_a.id,
+        file_bytes=content_bytes,
+        filename="dup_policy_test.txt",
+        mime_type="text/plain",
+        title="Duplicate Policy Test",
+    )
+    assert res2.status == "skipped_unchanged"
+    assert res2.embeddings_generated is True

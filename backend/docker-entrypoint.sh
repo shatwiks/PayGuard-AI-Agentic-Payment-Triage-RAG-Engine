@@ -37,9 +37,9 @@ echo "2. Applying Alembic schema migrations..."
 alembic upgrade head
 echo "-> Alembic migrations applied successfully."
 
-# 3. Seed Synthetic Dataset (Idempotent)
-echo "3. Verifying initial dataset..."
-python -m backend.app.scripts.seed_data
+# 3. Seed Synthetic Dataset (Idempotent & Live Re-embedding)
+echo "3. Verifying initial dataset and live embeddings..."
+python -m backend.app.scripts.seed_data --reembed-live
 echo "-> Dataset verified/seeded."
 
 # 4. Start Uvicorn Server (Single Worker for Staging In-Memory Rate Limiting)

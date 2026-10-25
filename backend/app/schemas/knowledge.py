@@ -85,6 +85,11 @@ class SearchResultItem(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Structured chunk metadata")
     ranking: RankingDetails = Field(description="Scoring and ranking diagnostics")
 
+    @property
+    def document_title(self) -> str:
+        """Alias for self.title."""
+        return self.title
+
     @computed_field
     @property
     def text(self) -> str:
@@ -193,6 +198,7 @@ class CitedExcerptItem(BaseModel):
     section_title: Optional[str] = None
     page_number: Optional[int] = None
     excerpt: str
+    parent_excerpt: Optional[str] = None
     score: float
 
 

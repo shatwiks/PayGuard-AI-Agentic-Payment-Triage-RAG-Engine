@@ -40,7 +40,7 @@ async def audit_storage(db_url: str, purge: bool = False):
     disk_files = set()
     for root, _, files in os.walk(settings.UPLOAD_STORAGE_DIR):
         for f in files:
-            if f == ".gitkeep":
+            if f in (".gitkeep", ".pending_deletes"):
                 continue
             full_path = os.path.normpath(os.path.abspath(os.path.join(root, f)))
             disk_files.add(full_path)

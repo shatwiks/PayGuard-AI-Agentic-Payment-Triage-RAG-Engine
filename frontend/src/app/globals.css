@@ -1,38 +1,158 @@
 @import "tailwindcss";
 
 :root {
-  --background: #F8FAFC;
-  --foreground: #0F172A;
-  --card: #FFFFFF;
-  --card-foreground: #0F172A;
-  --border: #E2E8F0;
-  --primary: #2563EB;
-  --primary-hover: #1D4ED8;
-  --secondary: #475569;
-  --muted: #64748B;
-  --neutral-bg: #F1F5F9;
+  /* Core Dark Fintech Palette */
+  --bg-canvas: #0B0D0F;
+  --bg-secondary: #111519;
+  --bg-elevated: #171C21;
+  --bg-interactive: #1D242B;
+  --bg-glass: rgba(17, 21, 25, 0.84);
+
+  /* Structural Borders */
+  --border-subtle: #1F262E;
+  --border-default: #262F38;
+  --border-strong: #333F4C;
+  --border-accent: rgba(198, 243, 106, 0.35);
+
+  /* Typography Colors */
+  --text-primary: #F3F5F7;
+  --text-secondary: #9BA5B0;
+  --text-muted: #6E7A87;
+  --text-inverse: #0B0D0F;
+
+  /* Restrained Electric Lime Accent */
+  --accent-primary: #C6F36A;
+  --accent-hover: #D4F788;
+  --accent-subtle: rgba(198, 243, 106, 0.10);
+  --accent-border: rgba(198, 243, 106, 0.28);
+
+  /* Semantic Financial States */
+  --status-success: #2DD4BF;
+  --status-success-bg: rgba(45, 212, 191, 0.10);
+  --status-success-border: rgba(45, 212, 191, 0.26);
+
+  --status-warning: #F59E0B;
+  --status-warning-bg: rgba(245, 158, 11, 0.10);
+  --status-warning-border: rgba(245, 158, 11, 0.28);
+
+  --status-error: #F87171;
+  --status-error-bg: rgba(248, 113, 113, 0.10);
+  --status-error-border: rgba(248, 113, 113, 0.28);
+
+  --status-info: #60A5FA;
+  --status-info-bg: rgba(96, 165, 250, 0.10);
+  --status-info-border: rgba(96, 165, 250, 0.26);
+
+  /* Legacy aliases for seamless compatibility */
+  --background: var(--bg-canvas);
+  --foreground: var(--text-primary);
+  --card: var(--bg-secondary);
+  --card-foreground: var(--text-primary);
+  --border: var(--border-subtle);
+  --primary: var(--accent-primary);
+
+  /* Motion Easing Tokens */
+  --ease-out-expo: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-quart: cubic-bezier(0.76, 0, 0.24, 1);
+
+  color-scheme: dark;
+}
+
+html {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 body {
-  background-color: var(--background);
-  color: var(--foreground);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans, "Plus Jakarta Sans", "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  selection-background-color: rgba(198, 243, 106, 0.22);
 }
 
-/* Custom scrollbars for data tables and code/citation inspectors */
+::selection {
+  background-color: rgba(198, 243, 106, 0.22);
+  color: #F3F5F7;
+}
+
+/* Tabular numerals for financial amounts, identifiers, latencies, and metrics */
+.tabular-nums,
+.font-mono,
+code,
+pre,
+td[data-numeric="true"] {
+  font-variant-numeric: tabular-nums;
+}
+
+.font-mono,
+code,
+pre {
+  font-family: var(--font-mono, "JetBrains Mono", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+}
+
+/* Accessible keyboard focus states */
+:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* Subtle architectural surface lighting for hero and workspace headers */
+.pg-tech-grid {
+  background-image: radial-gradient(
+    circle at 50% 0%,
+    rgba(198, 243, 106, 0.045),
+    transparent 65%
+  );
+}
+
+/* Double-bezel precision card surface */
+.pg-surface-shell {
+  background-color: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  padding: 4px;
+}
+
+.pg-surface-core {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.65);
+}
+
+/* Custom dark scrollbars for financial tables & evidence viewers */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
+
 ::-webkit-scrollbar-track {
-  background: #f1f5f9;
+  background: #0B0D0F;
 }
+
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #262F38;
   border-radius: 3px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: #3B4754;
 }
