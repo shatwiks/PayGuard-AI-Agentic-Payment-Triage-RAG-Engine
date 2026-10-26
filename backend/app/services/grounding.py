@@ -1,17 +1,17 @@
-"""Domain evidence grounding and constraint verification engine for PayGuard AI.
+"""Domain-agnostic evidence grounding and constraint verification engine for PayGuard AI.
 
 Provides:
-1. Deterministic, mathematically bounded candidate sentence extraction and scoring.
-2. Multi-tier financial constraint enforcement (Currency, Payment Rail, Action, Refund polarity).
-3. Exact alphanumeric rule identifier specificity and tie-breaking.
-4. Genuine token coverage validation preventing false-positive hallucinations on rule IDs alone.
-5. Conflicting competing rules detection with clean ambiguity abstention.
+1. Expected answer-type classification (duration, amount, percentage, date, yes_no, etc.)
+2. Typed-value verification ensuring candidate evidence contains matching factual values.
+3. Strict exclusion of bare headings, section titles, and table-of-contents lines from evidence.
+4. Identifier governance requiring candidate sentences to match specified rule IDs and predicates.
+5. Exact citation attribution and clean abstention when evidence is absent, conflicting, or ungrounded.
 """
 
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from backend.app.schemas.knowledge import CitedExcerptItem
 
@@ -27,18 +27,20 @@ class GroundedCandidate:
     modifiers: Set[str]
     token_coverage: float
     substantive_matches: int
+    has_typed_value: bool = False
 
 
 class FinancialConstraintRegistry:
-    """Standardized financial and regulatory domain vocabulary and constraints."""
+    """General stopwords, metadata words, and backward-compatible registry."""
 
     STOPWORDS: Set[str] = {
         "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
         "the", "and", "or", "for", "with", "does", "can", "should", "tell", "about",
         "is", "are", "was", "were", "be", "been", "under", "in", "on", "at", "to",
         "of", "from", "by", "as", "an", "a", "it", "its", "per", "that", "this",
-        "does", "do", "did", "have", "has", "had", "will", "would", "may", "might",
-        "long", "much", "many", "up", "down", "out", "over"
+        "does", "do", "did", "have", "has", "had", "will", "would", "may", "might", "must",
+        "long", "much", "many", "up", "down", "out", "over",
+        "all", "any", "some", "once", "after", "before", "each", "every",
     }
 
     META_WORDS: Set[str] = {
@@ -83,7 +85,7 @@ class FinancialConstraintRegistry:
     }
 
     MODIFIER_PAIRS: List[Tuple[Set[str], Set[str]]] = [
-        ({"standard", "regular", "normal"}, {"expedited", "express", "urgent", "priority", "rush", "same-day"}),
+        ({"standard", "regular", "normal", "routine", "baseline", "default"}, {"expedited", "express", "urgent", "priority", "rush", "same-day", "fast"}),
         ({"domestic", "local", "national"}, {"international", "cross-border", "overseas", "foreign", "global"}),
         ({"partial"}, {"full", "total", "entire"}),
     ]
@@ -111,6 +113,7 @@ class FinancialConstraintRegistry:
         {"crypto", "cryptocurrency", "digital", "asset", "digital asset", "digital assets", "crypto-to-fiat", "on-ramp"},
         {"barred", "prohibited", "prohibit", "forbidden", "prohibits", "deny", "denied", "permitted", "permit", "permits", "allowed", "allow", "allows"},
         {"platinum", "top-tier", "tier-1", "premier"},
+        {"distribution", "distributions", "disbursement", "disbursements", "disburse", "disbursed", "release", "releases", "released", "payout", "payouts"},
     ]
 
 
@@ -125,6 +128,35 @@ class EvidenceGroundingEngine:
         re.compile(r"(?i)\b(?:ignore|bypass|override)\s+(?:all\s+)?(?:previous|security|system|rules|gates)\b"),
         re.compile(r"(?i)<instruction\b"),
     ]
+
+    _HEADING_PATTERNS = [
+        re.compile(r"^\s*#{1,6}\s+"),
+        re.compile(r"^\s*(?:Section|Rule|Article|Clause|Guideline|Policy)\s+[0-9A-Za-z_.-]+(?::|\s+-\s*)?", re.IGNORECASE),
+        re.compile(r"^\s*[0-9]+(?:\.[0-9]+)+\s+[A-Za-z\s]{3,50}$"),
+    ]
+
+    @classmethod
+    def is_bare_heading(cls, text: str) -> bool:
+        """Determines if a candidate text fragment is a standalone heading or section label rather than an answering sentence."""
+        t = text.strip().rstrip(".:")
+        words = t.lower().split()
+        if not words:
+            return True
+        # If candidate contains units of duration, quantity, amount, or metric, it is an answering phrase, never a bare heading
+        unit_terms = {
+            "day", "days", "hour", "hours", "minute", "minutes", "second", "seconds",
+            "week", "weeks", "month", "months", "year", "years",
+            "percent", "percentage", "tier", "tiers", "level", "levels",
+            "dollar", "dollars", "euro", "euros", "usd", "eur", "gbp", "bps",
+        }
+        if any(w in unit_terms for w in words):
+            return False
+        for pat in cls._HEADING_PATTERNS:
+            if pat.search(t):
+                return True
+        if len(words) <= 4 and re.match(r"^[0-9.]+\s+[A-Z][a-z]+(?:\s+[A-Za-z]+)*$", t):
+            return True
+        return False
 
     @staticmethod
     def stem(word: str) -> str:
@@ -154,7 +186,7 @@ class EvidenceGroundingEngine:
 
     @classmethod
     def extract_rule_ids(cls, tokens: Set[str]) -> Set[str]:
-        """Extracts rule identifiers (e.g. VP-SEPA-401, AF-902, GS-7712)."""
+        """Extracts rule identifiers (e.g. VP-SEPA-401, AF-902, GS-7712, BACS-DD-802)."""
         rule_ids = set()
         for w in tokens:
             if "-" in w and any(c.isdigit() for c in w) and any(c.isalpha() for c in w):
@@ -162,6 +194,66 @@ class EvidenceGroundingEngine:
                 if parts[-1] not in FinancialConstraintRegistry.TIME_UNITS and parts[0] not in FinancialConstraintRegistry.TIME_UNITS:
                     rule_ids.add(w)
         return rule_ids
+
+    @staticmethod
+    def classify_expected_answer_type(query: str) -> str:
+        """Classifies the question's expected answer type from its interrogative structure."""
+        q = query.lower()
+        if re.search(r"\b(?:how long|timeframe|time limit|deadline|window|how many (?:business )?(?:days|hours|minutes|seconds|weeks|months|years))\b", q):
+            return "duration"
+        if re.search(r"\b(?:how much|fee|cost|charge|surcharge|fine|penalty|price|deduction|refund amount)\b", q):
+            return "amount"
+        if re.search(r"\b(?:rate|percent|percentage|basis points|ratio|bps|share of)\b", q):
+            return "percentage"
+        if re.search(r"\b(?:when|what date|effective date|cutoff date|expiration)\b", q):
+            return "date"
+        if re.search(r"^(?:is|are|can|does|do|will|should|may)\b", q) or re.search(r"\b(?:permitted|allowed|prohibited|forbidden|mandatory|required|eligible|qualify)\b", q):
+            return "yes_no"
+        if re.search(r"\b(?:how to|steps|procedure|process|workflow)\b", q):
+            return "procedure"
+        if re.search(r"\b(?:what is|define|definition of|meaning of)\b", q):
+            return "definition"
+        if re.search(r"\b(?:why|reason for|cause of)\b", q):
+            return "reason"
+        if re.search(r"\b(?:list|which types|what options|what tiers|name all)\b", q):
+            return "list"
+        return "entity"
+
+    @classmethod
+    def extract_typed_values(cls, text: str, expected_type: str) -> List[str]:
+        """Extracts values from text matching the expected answer type."""
+        t_lower = text.lower()
+        if expected_type == "duration":
+            matches = re.findall(
+                r"\b\d+(?:\.\d+)?(?:\s*|-)(?:business\s+day|calendar\s+day|banking\s+day|day|hour|minute|second|week|month|year)s?\b",
+                t_lower,
+            )
+            return matches
+        if expected_type == "amount":
+            matches = re.findall(
+                r"(?:[\$€£¥]|usd|eur|gbp|jpy|aud|cad|chf|cny)\s*\d+(?:,\d{3})*(?:\.\d+)?|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:dollars?|euros?|pounds?|cents?|usd|eur|gbp|jpy|aud|cad|chf|cny)\b",
+                t_lower,
+            )
+            return matches
+        if expected_type == "percentage":
+            matches = re.findall(
+                r"\b\d+(?:\.\d+)?\s*(?:%|percent|percentage|basis\s+points?|bps)\b",
+                t_lower,
+            )
+            return matches
+        if expected_type == "date":
+            matches = re.findall(
+                r"\b\d{4}[-/.]\d{2}[-/.]\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b",
+                t_lower,
+            )
+            return matches
+        if expected_type == "yes_no":
+            matches = re.findall(
+                r"\b(?:permitted|allowed|prohibited|forbidden|mandatory|required|may not|cannot|must not|is eligible|is ineligible|qualifies|does not qualify)\b",
+                t_lower,
+            )
+            return matches
+        return []
 
     def terms_match(self, q_term: str, doc_tokens: Set[str], context_text: str) -> bool:
         """Determines if a query term matches doc tokens via exact match, stemming, or synonym cluster."""
@@ -171,10 +263,8 @@ class EvidenceGroundingEngine:
         if stem_q in doc_tokens:
             return True
         for dt in doc_tokens:
-            stem_d = self.stem(dt)
-            if stem_q == stem_d:
+            if stem_q == self.stem(dt):
                 return True
-
         text_lower = context_text.lower()
         for cluster in self.registry.SYNONYM_CLUSTERS:
             if any(term == q_term or term == stem_q for term in cluster):
@@ -186,6 +276,7 @@ class EvidenceGroundingEngine:
         self,
         query: str,
         cited_excerpts: List[CitedExcerptItem],
+        expected_answer_type: Optional[str] = None,
     ) -> Tuple[str, bool, Optional[CitedExcerptItem]]:
         """Synthesizes grounded answer or abstains cleanly if facts are absent, mismatched, or ungrounded."""
         # 1. Defend against imperative prompt injection commands
@@ -198,21 +289,9 @@ class EvidenceGroundingEngine:
                 )
 
         q_lower = query.lower()
-
-        # Strip SQL injection / comment preamble (e.g., "'; DROP TABLE ...; -- ")
         q_norm = re.sub(r"^.*?;\s*--\s*", "", q_lower).strip() or q_lower
 
-        # Principled number phrase normalization (e.g. "ten million" -> "10000000")
-        num_word_map = {
-            "ten million": "10000000",
-            "10 million": "10000000",
-            "one million": "1000000",
-            "1 million": "1000000",
-            "five hundred": "500",
-        }
-        for nw, digit_val in num_word_map.items():
-            if nw in q_norm:
-                q_norm = q_norm.replace(nw, digit_val)
+        ans_type = expected_answer_type or self.classify_expected_answer_type(q_norm)
 
         raw_query_tokens = self.tokenize_text(q_norm)
         query_semantic_tokens = [
@@ -227,36 +306,7 @@ class EvidenceGroundingEngine:
                 None,
             )
 
-        # 2. Detect currency constraints
-        specified_currencies = set()
-        for curr, terms in self.registry.CURRENCIES.items():
-            if any(t in raw_query_tokens or t in q_lower for t in terms):
-                specified_currencies.add(curr)
-
-        # 3. Detect payment rails
-        specified_rails = set()
-        for rail, terms in self.registry.PAYMENT_RAILS.items():
-            if any(t in raw_query_tokens or t in q_lower for t in terms):
-                specified_rails.add(rail)
-
-        # 4. Detect tier constraints
-        query_has_micro = any(t in raw_query_tokens for t in {"micro", "small", "tier-1"})
-        query_has_enterprise = any(t in raw_query_tokens for t in {"enterprise", "corporate", "10000000"})
-
-        # 5. Detect specific banking action constraints
-        query_has_recall = any(t in raw_query_tokens for t in {"recall", "recalls"})
-        query_has_cancel = any(t in raw_query_tokens for t in {"cancel", "cancelling", "cancellation", "abort", "aborting"})
-
-        # 6. Detect refund constraints (partial vs full)
-        query_has_full_refund = ("full refund" in q_lower or ("full" in raw_query_tokens and "refund" in raw_query_tokens))
-
-        # 7. Detect domain topic anchors
-        specified_topics = set()
-        for topic, terms in self.registry.TOPIC_CONSTRAINTS.items():
-            if any(t in raw_query_tokens or t in q_lower for t in terms):
-                specified_topics.add(topic)
-
-        # 8. Detect exact alphanumeric rule identifiers in query (e.g., "vp-sepa-401", "gs-7712")
+        # Detect exact alphanumeric rule identifiers in query (e.g., "vp-sepa-401", "af-902", "bacs-dd-802")
         query_rule_ids = self.extract_rule_ids(self.tokenize_text(query))
         rule_id_tokens = set(query_rule_ids)
         for rid in query_rule_ids:
@@ -266,6 +316,24 @@ class EvidenceGroundingEngine:
         substantive_query_tokens = [w for w in query_semantic_tokens if w not in rule_id_tokens]
         substantive_subject_tokens = [w for w in substantive_query_tokens if w not in self.registry.GENERIC_ATTRIBUTES]
 
+        # Detect currency constraints
+        specified_currencies = set()
+        for curr, terms in self.registry.CURRENCIES.items():
+            if any(t in raw_query_tokens or t in q_lower for t in terms):
+                specified_currencies.add(curr)
+
+        # Detect payment rails
+        specified_rails = set()
+        for rail, terms in self.registry.PAYMENT_RAILS.items():
+            if any(t in raw_query_tokens or t in q_lower for t in terms):
+                specified_rails.add(rail)
+
+        # Detect domain topic anchors
+        specified_topics = set()
+        for topic, terms in self.registry.TOPIC_CONSTRAINTS.items():
+            if any(t in raw_query_tokens or t in q_lower for t in terms):
+                specified_topics.add(topic)
+
         candidate_records: List[GroundedCandidate] = []
 
         for exc in cited_excerpts:
@@ -274,20 +342,56 @@ class EvidenceGroundingEngine:
             combined_header = f"{doc_title} {sec_title}"
             header_tokens = self.tokenize_text(combined_header)
 
-            sentences = [s.strip() for s in re.split(r"(?<!\d)\.(?!\d)\s*|\n+", exc.excerpt) if len(s.strip()) > 15]
+            raw_lines = [l.strip() for l in exc.excerpt.splitlines() if l.strip()]
+            normalized_units = []
+            curr_body_lines = []
+            for l in raw_lines:
+                if self.is_bare_heading(l) or l.endswith(":"):
+                    if curr_body_lines:
+                        normalized_units.append(" ".join(curr_body_lines))
+                        curr_body_lines = []
+                    normalized_units.append(l)
+                else:
+                    curr_body_lines.append(l)
+            if curr_body_lines:
+                normalized_units.append(" ".join(curr_body_lines))
+
+            sentence_split_regex = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
+            sentences = []
+            for unit in normalized_units:
+                if self.is_bare_heading(unit) or unit.endswith(":"):
+                    sentences.append(unit)
+                else:
+                    parts = [s.strip() for s in sentence_split_regex.split(unit) if len(s.strip()) > 15]
+                    sentences.extend(parts)
 
             current_lead_in = ""
+            lead_in_parts = []
             for s in sentences:
-                if s.strip().endswith(":"):
-                    current_lead_in = s.strip()
+                if s.strip().endswith(":") or self.is_bare_heading(s):
+                    clean_h = s.strip()
+                    if re.match(r"^\d+\s+[A-Za-z]", clean_h):
+                        lead_in_parts = [clean_h]
+                    else:
+                        lead_in_parts.append(clean_h)
+                    current_lead_in = " ".join(lead_in_parts)
                     continue
 
                 sentence_tokens = self.tokenize_text(s)
                 lead_in_tokens = self.tokenize_text(current_lead_in) if current_lead_in else set()
                 full_context_text = f"{combined_header} {current_lead_in} {s}"
-                full_context_lower = full_context_text.lower()
                 s_lower = s.lower()
                 s_context = f"{current_lead_in} {s}".strip() if current_lead_in else s
+
+                # Check if sentence contains value matching expected answer type
+                typed_values = self.extract_typed_values(s, ans_type)
+                has_typed_value = len(typed_values) > 0
+
+                # If question expects duration/amount/percentage/date/yes_no, candidate must have matching value
+                if ans_type in ("duration", "amount", "percentage", "date", "yes_no") and not has_typed_value:
+                    continue
+
+                full_context_lower = full_context_text.lower()
 
                 # Currency Guard
                 if specified_currencies:
@@ -296,6 +400,12 @@ class EvidenceGroundingEngine:
                         if any(t in sentence_tokens or t in s_lower for t in terms):
                             sentence_currencies.add(curr)
                     if sentence_currencies and not (specified_currencies & sentence_currencies):
+                        continue
+                    header_currencies = {
+                        c for c, terms in self.registry.CURRENCIES.items()
+                        if any(t in header_tokens for t in terms)
+                    }
+                    if not (specified_currencies & (sentence_currencies | header_currencies)):
                         continue
 
                 # Rail Guard
@@ -351,41 +461,25 @@ class EvidenceGroundingEngine:
                 if query_rule_ids:
                     sentence_rule_ids = self.extract_rule_ids(sentence_tokens)
                     lead_in_rule_ids = self.extract_rule_ids(lead_in_tokens)
+                    has_rule_in_sentence = bool(query_rule_ids & sentence_tokens)
+                    has_rule_in_lead = bool(query_rule_ids & lead_in_tokens)
+                    has_rule_in_header = bool(query_rule_ids & header_tokens)
 
-                    if query_rule_ids & sentence_tokens:
+                    # Sentence or its immediate context MUST match rule ID
+                    if not (has_rule_in_sentence or has_rule_in_lead or has_rule_in_header):
+                        continue
+
+                    if has_rule_in_sentence:
                         identifier_bonus += 3.0
-                    elif query_rule_ids & lead_in_tokens:
+                    elif has_rule_in_lead:
                         identifier_bonus += 2.5
-                    elif query_rule_ids & header_tokens:
+                    elif has_rule_in_header:
                         identifier_bonus += 1.5
 
                     if sentence_rule_ids and not (query_rule_ids & sentence_rule_ids):
                         continue
                     if lead_in_rule_ids and not (query_rule_ids & lead_in_rule_ids):
                         continue
-
-                # Tier Guard
-                if query_has_micro and not query_has_enterprise:
-                    if "enterprise" in s_lower or "corporate" in s_lower or "10000000" in s_lower:
-                        if not any(m in s_lower for m in {"micro", "small", "tier-1"}):
-                            continue
-                if query_has_enterprise and not query_has_micro:
-                    if "micro-merchant" in full_context_lower or "tier-1" in full_context_lower:
-                        if not any(e in full_context_lower for e in {"enterprise", "corporate", "10000000"}):
-                            continue
-
-                # Action Guard
-                if query_has_recall and not query_has_cancel:
-                    if "recall" not in full_context_lower:
-                        continue
-                if query_has_cancel and not query_has_recall:
-                    if not any(c in full_context_lower for c in {"cancel", "abort"}):
-                        if "wire" not in full_context_lower and "swift" not in full_context_lower:
-                            continue
-
-                # Refund Guard
-                if query_has_full_refund and "partial refund" in s_lower and "full refund" not in s_lower:
-                    continue
 
                 # Substantive subject match requirement
                 subj_matches = sum(
@@ -409,12 +503,14 @@ class EvidenceGroundingEngine:
                     if self.terms_match(qw, header_tokens, combined_header) and not self.terms_match(qw, sentence_tokens | lead_in_tokens, s_context)
                 )
 
-                total_matches = sentence_matches + (0.5 * header_matches) + modifier_bonus + identifier_bonus
+                type_bonus = 3.0 if has_typed_value else 0.0
+                total_matches = sentence_matches + (0.5 * header_matches) + modifier_bonus + identifier_bonus + type_bonus
 
                 valid_candidate = (
                     sentence_matches >= 2
                     or (sentence_matches >= 1 and subj_matches >= 1)
                     or (header_matches >= 2 and subj_matches >= 1)
+                    or (has_typed_value and subj_matches >= 1)
                     or (bool(query_rule_ids) and not substantive_query_tokens and sentence_matches >= 1)
                 )
 
@@ -441,6 +537,7 @@ class EvidenceGroundingEngine:
                             modifiers=matched_modifiers,
                             token_coverage=token_cov,
                             substantive_matches=substantive_sentence_matches,
+                            has_typed_value=has_typed_value,
                         )
                     )
 
@@ -472,7 +569,8 @@ class EvidenceGroundingEngine:
                         None,
                     )
 
-        if max_score < 1.5 or top_cand.token_coverage < 0.35 or not best_match_sentence or not best_match_excerpt:
+        min_cov = 0.15 if top_cand.has_typed_value else 0.35
+        if max_score < 1.5 or top_cand.token_coverage < min_cov or not best_match_sentence or not best_match_excerpt:
             return (
                 f"The provided document does not contain sufficient information to answer the question: '{query}'.",
                 False,

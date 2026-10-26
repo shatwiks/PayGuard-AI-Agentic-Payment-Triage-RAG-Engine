@@ -20,6 +20,10 @@ class TextChunk(BaseModel):
     parent_index: Optional[int] = Field(default=None, description="Index of parent chunk if this is a child chunk")
     section_title: Optional[str] = Field(default=None, description="Clean section title")
     content_hash: Optional[str] = Field(default=None, description="SHA-256 hash of chunk content")
+    heading_path: Optional[str] = Field(default=None, description="Hierarchical heading path, e.g. '2 Processing > 2.1 Standard'")
+    page_number: Optional[int] = Field(default=None, description="Page number if available")
+    char_start: Optional[int] = Field(default=None, description="Character offset start in raw document")
+    char_end: Optional[int] = Field(default=None, description="Character offset end in raw document")
 
 
 HierarchicalChunk = TextChunk
@@ -35,9 +39,14 @@ class HierarchicalChunkResult(BaseModel):
 class DocumentChunker:
     """Production-grade hierarchical section and table-aware document chunker."""
 
-    # Heading patterns: markdown '# Header', '## Header', or structured 'Section X.X: Header', 'Rule 10.4 - Header'
+    # Generic heading regex: Markdown #+, numbered '1. ', '1.1 ', 'Section 1.1:', 'Rule 10.4 -', or ALL CAPS lines
     HEADER_REGEX = re.compile(
-        r"^(?:#{1,6}\s+(.+)|((?:Section|Rule|Article)\s+[0-9A-Za-z_.-]+(?::|\s+-)[^\n]{0,120}))$",
+        r"^(?:"
+        r"(#{1,6}\s+.+)|"
+        r"((?:Section|Rule|Article|Clause|Part)\s+[0-9A-Za-z_.-]+(?::|\s+-)\s*[^\n]{0,120})|"
+        r"((?:[0-9]{1,3}(?:\.[0-9]{1,3})+|\b[0-9]{1,2}\.)\s+[A-Z][^\n.]{0,100})|"
+        r"([A-Z0-9\s,:\-]{4,60}[A-Z0-9])"
+        r")$",
         re.MULTILINE,
     )
 
@@ -57,9 +66,14 @@ class DocumentChunker:
         re.IGNORECASE,
     )
 
-    # Date pattern (YYYY-MM-DD or YYYY.MM.DD)
+    # Generic date pattern (YYYY-MM-DD or YYYY.MM.DD)
     DATE_REGEX = re.compile(
         r"\b(20[2-9][0-9][-/.][0-1][0-9][-/.][0-3][0-9])\b"
+    )
+
+    # Generic alphanumeric identifier pattern (e.g. VP-SEPA-401, AF-902, R01, Rule-10.4)
+    IDENTIFIER_REGEX = re.compile(
+        r"\b([A-Z]{2,}(?:-[A-Z0-9]+)+(?:\.[0-9]+)?|[A-Z]{1,4}-[0-9]{2,4}|R[0-9]{2})\b"
     )
 
     def __init__(
@@ -146,7 +160,7 @@ class DocumentChunker:
         source_id: Optional[str] = None,
         base_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Extracts structured payment domain metadata from text and trusted headers."""
+        """Extracts structured metadata from text, schemes, rules, and trusted headers."""
         meta: Dict[str, Any] = dict(base_metadata or {})
         combined_text = f"{document_title or ''} {text}"
 
@@ -163,11 +177,21 @@ class DocumentChunker:
                 else:
                     meta["scheme"] = raw_scheme.capitalize()
 
-        # 2. Condition or Return Code
+        # 2. Condition or Return Code / Generic Rule Identifier
         if "condition_code" not in meta:
             code_match = self.CONDITION_CODE_REGEX.search(combined_text)
             if code_match:
-                meta["condition_code"] = (code_match.group(1) or code_match.group(2)).upper()
+                code_val = (code_match.group(1) or code_match.group(2)).upper()
+                meta["condition_code"] = code_val
+                meta["rule_id"] = code_val
+            else:
+                id_match = self.IDENTIFIER_REGEX.search(combined_text)
+                if id_match:
+                    rule_val = id_match.group(1).upper()
+                    meta["condition_code"] = rule_val
+                    meta["rule_id"] = rule_val
+        elif "rule_id" not in meta:
+            meta["rule_id"] = meta["condition_code"]
 
         # 3. Effective Date (strictly validated against Gregorian calendar)
         if "effective_date" not in meta:
@@ -178,7 +202,6 @@ class DocumentChunker:
                     parsed_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
                     meta["effective_date"] = parsed_date.isoformat()
                 except ValueError:
-                    # Ignore invalid calendar dates (e.g., 2026-02-31)
                     pass
 
         # 4. Source Document
@@ -191,16 +214,89 @@ class DocumentChunker:
 
         return meta
 
-    def _split_into_sections(self, normalized_text: str, document_title: Optional[str] = None) -> List[Dict[str, str]]:
-        """Parses document into meaningful sections based on markdown and structured headings."""
-        sections: List[Dict[str, str]] = []
+    @staticmethod
+    def unwrap_paragraph(paragraph_text: str) -> str:
+        """Un-wraps hard line breaks inside individual paragraphs while preserving paragraph boundaries (\n\n), list items, and table rows."""
+        if not paragraph_text:
+            return ""
+        raw_paragraphs = re.split(r"\n\s*\n", paragraph_text)
+        clean_paragraphs = []
+        for p in raw_paragraphs:
+            lines = p.split("\n")
+            if any(line.strip().startswith("|") for line in lines):
+                clean_paragraphs.append("\n".join(lines).strip())
+                continue
+
+            p_parts: List[str] = []
+            curr_line: List[str] = []
+            for line in lines:
+                s = line.strip()
+                if not s:
+                    continue
+                is_bullet = bool(re.match(r"^(?:[-*•]|\d+\.|\([a-zA-Z0-9]+\))\s+", s))
+                if is_bullet:
+                    if curr_line:
+                        p_parts.append(" ".join(curr_line))
+                        curr_line = []
+                    p_parts.append(s)
+                else:
+                    curr_line.append(s)
+            if curr_line:
+                p_parts.append(" ".join(curr_line))
+            if p_parts:
+                clean_paragraphs.append("\n".join(p_parts))
+        return "\n\n".join(clean_paragraphs)
+
+    @staticmethod
+    def split_into_sentences(text: str) -> List[str]:
+        """Splits text into coherent sentences without splitting on decimals, currencies, abbreviations, or rule IDs."""
+        if not text:
+            return []
+
+        # Protect dots that must not trigger sentence boundary splits
+        protected = re.sub(r"(\d+)\.(\d+)", r"\1__DECIMAL_DOT__\2", text)
+        protected = re.sub(r"([$€£¥])(\d+)__DECIMAL_DOT__(\d+)", r"\1\2__CURRENCY_DOT__\3", protected)
+
+        common_abbrs = [
+            "e.g.", "i.e.", "vs.", "approx.", "etc.", "Inc.", "Ltd.", "Corp.", "Co.",
+            "No.", "Mr.", "Mrs.", "Ms.", "Dr.", "Jan.", "Feb.", "Mar.", "Apr.", "Jun.",
+            "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec."
+        ]
+        for abbr in common_abbrs:
+            safe_abbr = abbr.replace(".", "__ABBR_DOT__")
+            protected = re.sub(re.escape(abbr), safe_abbr, protected, flags=re.IGNORECASE)
+
+        protected = re.sub(r"\b([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\b", r"\1__ID_DOT__\2", protected)
+
+        # Split on sentence boundaries: [.!?] followed by whitespace and uppercase/quote/bracket, or multiple newlines
+        parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])|\n{2,}", protected)
+
+        restored: List[str] = []
+        for p in parts:
+            clean = (
+                p.replace("__DECIMAL_DOT__", ".")
+                .replace("__CURRENCY_DOT__", ".")
+                .replace("__ABBR_DOT__", ".")
+                .replace("__ID_DOT__", ".")
+                .strip()
+            )
+            if clean:
+                restored.append(clean)
+        return restored
+
+    def _split_into_sections(self, normalized_text: str, document_title: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Parses document into meaningful sections with hierarchical heading paths."""
+        sections: List[Dict[str, Any]] = []
         matches = list(self.HEADER_REGEX.finditer(normalized_text))
 
         if not matches:
             default_header = document_title or "General Policy"
             sections.append({
                 "header": default_header,
-                "body": normalized_text,
+                "heading_path": default_header,
+                "body": self.unwrap_paragraph(normalized_text),
+                "char_start": 0,
+                "char_end": len(normalized_text),
             })
             return sections
 
@@ -211,19 +307,49 @@ class DocumentChunker:
             if preamble:
                 sections.append({
                     "header": f"{document_title} - Overview" if document_title else "Overview",
-                    "body": preamble,
+                    "heading_path": f"{document_title} > Overview" if document_title else "Overview",
+                    "body": self.unwrap_paragraph(preamble),
+                    "char_start": 0,
+                    "char_end": first_match.start(),
                 })
 
+        # Heading stack for hierarchical path tracking e.g. ["2 Processing", "2.1 Standard"]
+        heading_stack: List[Tuple[int, str]] = []
+
         for idx, match in enumerate(matches):
-            raw_header = match.group(1) or match.group(2)
-            header = raw_header.strip().lstrip("#").strip() if raw_header else "Section"
+            raw_matched = next((g for g in match.groups() if g is not None), match.group(0))
+            raw_header = raw_matched.strip()
+            # Determine level
+            level = 1
+            clean_title = raw_header
+            if raw_header.startswith("#"):
+                hashes = len(raw_header) - len(raw_header.lstrip("#"))
+                level = hashes
+                clean_title = raw_header.lstrip("#").strip()
+            elif re.match(r"^(?:Section|Article|Clause|Rule)?\s*(\d+(?:\.\d+)*)", raw_header):
+                num_match = re.match(r"^(?:Section|Article|Clause|Rule)?\s*(\d+(?:\.\d+)*)", raw_header)
+                dots = num_match.group(1).count(".")
+                level = dots + 1
+            elif raw_header.isupper():
+                level = 1
+
+            # Update heading stack
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            heading_stack.append((level, clean_title))
+
+            heading_path = " > ".join([h[1] for h in heading_stack])
             start_body = match.end()
             end_body = matches[idx + 1].start() if idx + 1 < len(matches) else len(normalized_text)
-            body = normalized_text[start_body:end_body].strip()
+            raw_body = normalized_text[start_body:end_body].strip()
+            body = self.unwrap_paragraph(raw_body)
             if body:
                 sections.append({
-                    "header": header,
+                    "header": clean_title,
+                    "heading_path": heading_path,
                     "body": body,
+                    "char_start": match.start(),
+                    "char_end": end_body,
                 })
 
         return sections
@@ -325,7 +451,10 @@ class DocumentChunker:
 
         for sec in sections:
             header = sec["header"]
+            heading_path = sec.get("heading_path", header)
             body = sec["body"]
+            char_start = sec.get("char_start", 0)
+            char_end = sec.get("char_end", len(body))
             sec_tokens = self.estimate_tokens(body)
 
             # Step 1: Create Parent Chunks (~1000 tokens)
@@ -376,6 +505,9 @@ class DocumentChunker:
                     "document_title": document_title,
                     "source_id": source_id,
                     "section_title": header,
+                    "heading_path": heading_path,
+                    "char_start": char_start,
+                    "char_end": char_end,
                     "chunk_type": "parent",
                 })
 
@@ -388,6 +520,9 @@ class DocumentChunker:
                     chunk_index=parent_idx,
                     section_header=header,
                     section_title=header,
+                    heading_path=heading_path,
+                    char_start=char_start,
+                    char_end=char_end,
                     content=parent_content,
                     token_count=self.estimate_tokens(parent_content),
                     chunk_type="parent",
@@ -460,6 +595,9 @@ class DocumentChunker:
                         "document_title": document_title,
                         "source_id": source_id,
                         "section_title": header,
+                        "heading_path": heading_path,
+                        "char_start": char_start,
+                        "char_end": char_end,
                         "parent_chunk_index": parent_idx,
                         "chunk_type": "child",
                     })
@@ -468,6 +606,9 @@ class DocumentChunker:
                         chunk_index=child_idx,
                         section_header=header,
                         section_title=header,
+                        heading_path=heading_path,
+                        char_start=char_start,
+                        char_end=char_end,
                         content=c_text,
                         token_count=c_tokens,
                         chunk_type="child",
@@ -506,43 +647,16 @@ class DocumentChunker:
         if not normalized:
             return []
 
-        # Find all section headers and their start positions
-        sections: List[Dict[str, Any]] = []
-        matches = list(self.HEADER_REGEX.finditer(normalized))
-
-        if not matches:
-            default_header = document_title or "General"
-            sections.append({
-                "header": default_header,
-                "body": normalized,
-            })
-        else:
-            first_match = matches[0]
-            if first_match.start() > 0:
-                preamble = normalized[:first_match.start()].strip()
-                if preamble:
-                    sections.append({
-                        "header": f"{document_title} - Overview" if document_title else "Overview",
-                        "body": preamble,
-                    })
-
-            for idx, match in enumerate(matches):
-                raw_header = match.group(1) or match.group(2)
-                header = raw_header.strip().lstrip("#").strip() if raw_header else "Section"
-                start_body = match.end()
-                end_body = matches[idx + 1].start() if idx + 1 < len(matches) else len(normalized)
-                body = normalized[start_body:end_body].strip()
-                if body:
-                    sections.append({
-                        "header": header,
-                        "body": body,
-                    })
+        sections = self._split_into_sections(normalized, document_title=document_title)
 
         chunks: List[TextChunk] = []
         chunk_index = 0
 
         for sec in sections:
             header = sec["header"]
+            heading_path = sec.get("heading_path", header)
+            char_start = sec.get("char_start", 0)
+            char_end = sec.get("char_end", len(sec["body"]))
             body = sec["body"]
 
             if len(body) <= self.target_chunk_size + self.chunk_overlap:
@@ -550,6 +664,9 @@ class DocumentChunker:
                 meta.update({
                     "document_title": document_title,
                     "source_id": source_id,
+                    "heading_path": heading_path,
+                    "char_start": char_start,
+                    "char_end": char_end,
                     "split_type": "whole_section",
                 })
                 chunks.append(
@@ -557,6 +674,9 @@ class DocumentChunker:
                         chunk_index=chunk_index,
                         section_header=header,
                         section_title=header,
+                        heading_path=heading_path,
+                        char_start=char_start,
+                        char_end=char_end,
                         content=body,
                         token_count=self.estimate_tokens(body),
                         content_hash=self.compute_content_hash(body),
@@ -579,6 +699,9 @@ class DocumentChunker:
                         meta.update({
                             "document_title": document_title,
                             "source_id": source_id,
+                            "heading_path": heading_path,
+                            "char_start": char_start,
+                            "char_end": char_end,
                             "split_type": "paragraph_split",
                         })
                         chunks.append(
@@ -586,6 +709,9 @@ class DocumentChunker:
                                 chunk_index=chunk_index,
                                 section_header=header,
                                 section_title=header,
+                                heading_path=heading_path,
+                                char_start=char_start,
+                                char_end=char_end,
                                 content=current_buffer,
                                 token_count=self.estimate_tokens(current_buffer),
                                 content_hash=self.compute_content_hash(current_buffer),
@@ -608,6 +734,9 @@ class DocumentChunker:
                     meta.update({
                         "document_title": document_title,
                         "source_id": source_id,
+                        "heading_path": heading_path,
+                        "char_start": char_start,
+                        "char_end": char_end,
                         "split_type": "paragraph_tail",
                     })
                     chunks.append(
@@ -615,6 +744,9 @@ class DocumentChunker:
                             chunk_index=chunk_index,
                             section_header=header,
                             section_title=header,
+                            heading_path=heading_path,
+                            char_start=char_start,
+                            char_end=char_end,
                             content=current_buffer.strip(),
                             token_count=self.estimate_tokens(current_buffer.strip()),
                             content_hash=self.compute_content_hash(current_buffer.strip()),

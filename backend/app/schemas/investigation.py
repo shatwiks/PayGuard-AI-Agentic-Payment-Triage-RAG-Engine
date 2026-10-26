@@ -40,6 +40,7 @@ class PolicyCitation(BaseModel):
     source_url: Optional[str] = Field(default=None, description="Canonical source URL")
     document_id: Optional[uuid.UUID] = Field(default=None, description="UUID of source knowledge document")
     chunk_id: Optional[uuid.UUID] = Field(default=None, description="UUID of cited chunk")
+    page_number: Optional[int] = Field(default=None, description="Page number of cited document chunk")
     is_synthetic_demonstration: bool = Field(default=True, description="Flag indicating synthetic demonstration status")
 
     @property

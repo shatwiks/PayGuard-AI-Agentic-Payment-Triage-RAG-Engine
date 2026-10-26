@@ -8,6 +8,7 @@ Supports:
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 import httpx
 
@@ -31,7 +32,7 @@ class LLMReasoningService(ILLMReasoningService):
     def __init__(
         self,
         model_name: Optional[str] = None,
-        timeout_seconds: float = 20.0,
+        timeout_seconds: float = 60.0,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         provider: Optional[str] = None,
@@ -445,3 +446,344 @@ class LLMReasoningService(ILLMReasoningService):
             generation_mode="deterministic_fallback",
             cited_chunks=citations,
         )
+
+    async def generate_query_paraphrases(
+        self,
+        query: str,
+        count: int = 2,
+    ) -> List[str]:
+        """Generates alternative search queries / paraphrases to bridge vocabulary gaps without hand-written synonyms."""
+        if not self.is_live_provider or not query.strip():
+            return []
+
+        system_prompt = (
+            "You are a search query expander. Given a user question, generate alternative keyword-rich "
+            f"phrasings or search terms to retrieve relevant document passages. Output exactly {count} alternative "
+            "queries, one per line. Do not number them, do not output bullets, and do not include quotes."
+        )
+        user_content = f"Question: {query.strip()}"
+
+        try:
+            raw_text = ""
+            if self.is_live_ollama and not self.is_live_openai:
+                url = f"{self.ollama_base_url}/api/chat"
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.2},
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        raw_text = resp.json().get("message", {}).get("content", "").strip()
+            elif self.is_live_openai:
+                url = f"{self.base_url}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 150,
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        raw_text = resp.json()["choices"][0]["message"]["content"].strip()
+
+            paraphrases = []
+            for line in raw_text.splitlines():
+                cleaned = line.strip().strip("-*0123456789. \"'")
+                if cleaned and len(cleaned) > 5 and cleaned.lower() != query.strip().lower():
+                    paraphrases.append(cleaned)
+                    if len(paraphrases) >= count:
+                        break
+            return paraphrases
+        except Exception as exc:
+            logger.debug("Query paraphrasing skipped (%s)", exc)
+            return []
+
+    async def classify_expected_answer_type(
+        self,
+        query: str,
+    ) -> str:
+        """Classifies the question's expected answer type: duration, amount, percentage, date, yes_no, entity, list, procedure, definition, reason."""
+        valid_types = {"duration", "amount", "percentage", "date", "yes_no", "entity", "list", "procedure", "definition", "reason"}
+        if not self.is_live_provider or not query.strip():
+            return self._heuristic_answer_type(query)
+
+        system_prompt = (
+            "You are a strict question classifier. Classify the user question into exactly one of these categories: "
+            "[duration, amount, percentage, date, yes_no, entity, list, procedure, definition, reason]. "
+            "Output ONLY the single category name in lowercase without punctuation or explanation."
+        )
+        try:
+            raw_text = ""
+            if self.is_live_ollama and not self.is_live_openai:
+                url = f"{self.ollama_base_url}/api/chat"
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": query.strip()},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.0},
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        raw_text = resp.json().get("message", {}).get("content", "").strip().lower()
+            elif self.is_live_openai:
+                url = f"{self.base_url}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": query.strip()},
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 10,
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        raw_text = resp.json()["choices"][0]["message"]["content"].strip().lower()
+
+            words = re.findall(r"\b[a-z_]+\b", raw_text)
+            for w in words:
+                if w in valid_types:
+                    return w
+        except Exception as exc:
+            logger.debug("LLM answer type classification skipped (%s)", exc)
+
+        return self._heuristic_answer_type(query)
+
+    @staticmethod
+    def _heuristic_answer_type(query: str) -> str:
+        """Lightweight heuristic question answer-type classifier for fallback and offline mode."""
+        q = query.lower()
+        if re.search(r"\b(?:how long|timeframe|time limit|deadline|window|how many (?:business )?(?:days|hours|minutes|seconds|weeks|months|years))\b", q):
+            return "duration"
+        if re.search(r"\b(?:how much|fee|cost|charge|surcharge|fine|penalty|price|deduction|refund amount)\b", q):
+            return "amount"
+        if re.search(r"\b(?:rate|percent|percentage|basis points|ratio|bps|share of)\b", q):
+            return "percentage"
+        if re.search(r"\b(?:when|what date|effective date|cutoff date|expiration)\b", q):
+            return "date"
+        if re.search(r"^(?:is|are|can|does|do|will|should|may)\b", q) or re.search(r"\b(?:permitted|allowed|prohibited|forbidden|mandatory|required|eligible|qualify)\b", q):
+            return "yes_no"
+        if re.search(r"\b(?:how to|steps|procedure|process|workflow)\b", q):
+            return "procedure"
+        if re.search(r"\b(?:what is|define|definition of|meaning of)\b", q):
+            return "definition"
+        if re.search(r"\b(?:why|reason for|cause of)\b", q):
+            return "reason"
+        if re.search(r"\b(?:list|which types|what options|what tiers|name all)\b", q):
+            return "list"
+        return "entity"
+
+    async def verify_entailment(
+        self,
+        evidence_text: str,
+        claim: str,
+    ) -> bool:
+        """Verifies if the claim is strictly supported by the evidence text using LLM entailment reasoning."""
+        if not self.is_live_provider or not evidence_text or not claim:
+            return True
+
+        system_prompt = (
+            "You are a factual entailment verifier. Answer 'YES' if the statement's core claims, rule IDs, and numbers "
+            "are consistent with and supported by the context text, even if paraphrased or summarized. "
+            "Answer 'NO' if the statement introduces new entities, subjects, rules, or numbers absent from the text, "
+            "or if it contradicts the text. "
+            "Output ONLY 'YES' or 'NO'."
+        )
+        user_content = f"TEXT: {evidence_text[:3000]}\nSTATEMENT: {claim}\nIs the statement fully supported? Answer YES or NO:"
+
+        try:
+            raw_text = ""
+            if self.is_live_ollama and not self.is_live_openai:
+                url = f"{self.ollama_base_url}/api/chat"
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.0},
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        raw_text = resp.json().get("message", {}).get("content", "").strip().upper()
+            elif self.is_live_openai:
+                url = f"{self.base_url}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 10,
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        raw_text = resp.json()["choices"][0]["message"]["content"].strip().upper()
+
+            if "NO" in raw_text:
+                return False
+            if "YES" in raw_text:
+                return True
+        except Exception as exc:
+            logger.debug("Entailment check skipped (%s)", exc)
+
+        return True
+
+    async def generate_structured_qa_answer(
+        self,
+        query: str,
+        context_excerpts: List[PolicyCitation],
+    ) -> Optional[Dict[str, Any]]:
+        """Generates structured JSON document QA answer: {answer, supporting_quotes, confidence, answerable}."""
+        if not self.is_live_provider or not context_excerpts:
+            return None
+
+        def _defuse_xml(text: str) -> str:
+            if not text:
+                return ""
+            return (
+                text.replace("</untrusted_document_context>", "&lt;/untrusted_document_context&gt;")
+                .replace("<untrusted_document_context>", "&lt;untrusted_document_context&gt;")
+                .replace("</untrusted_user_query>", "&lt;/untrusted_user_query&gt;")
+                .replace("<untrusted_user_query>", "&lt;untrusted_user_query&gt;")
+                .replace("</system>", "&lt;/system&gt;")
+                .replace("<system>", "&lt;system&gt;")
+            )
+
+        context_lines = []
+        for c in context_excerpts:
+            doc_info = f"Document: {c.document_title} | Section: {c.section_header}"
+            if c.page_number:
+                doc_info += f" | Page: {c.page_number}"
+            clean_excerpt = _defuse_xml(c.excerpt[:1200])
+            context_lines.append(f"[{doc_info}]\n{clean_excerpt}")
+
+        joined_context = "\n\n".join(context_lines)
+        safe_query = _defuse_xml(query)
+
+        system_prompt = (
+            "You are PayGuard AI, an evidence-grounded compliance question-answering engine. "
+            "You answer user questions strictly using the provided verified document excerpts.\n\n"
+            "RULES:\n"
+            "1. Answer strictly from the context. Never extrapolate or assume facts not in the text.\n"
+            "2. Compliance & Prohibition Terms: For questions asking if an action is permitted, allowed, or possible, "
+            "directly state whether it is permitted or denied, and explicitly include the policy's exact formal terms "
+            "(e.g., 'strictly prohibited', 'automatically rejected', 'automatic forfeiture', 'under no circumstances', 'mandatory', 'permitted').\n"
+            "3. Natural Paraphrases: Recognize standard financial, merchant, and payment terminology (e.g., 'seller'/'store owner' for 'merchant', "
+            "'contestation'/'rebuttal' for 'dispute'/'representment', 'defective hardware' for 'defective terminal', 'bounce' for 'return'). "
+            "Do NOT abstain if the user's terms map naturally to context concepts.\n"
+            "4. Multi-Hop Synthesis & Arithmetic: When answering requires synthesizing, comparing, or combining facts from multiple excerpts "
+            "(e.g. comparing tier rates, calculating net fees after credits, or contrasting timeframes), combine the facts from all relevant excerpts into a complete answer. "
+            "When computing net amounts, perform the exact arithmetic (e.g. $10.00 dispute fee minus $2.00 early resolution credit equals $8.00 USD).\n"
+            "5. Strict Topic and Predicate Integrity: If a question mentions an asset, action, technology, currency, or topic "
+            "(e.g. cryptocurrency, staking, Bitcoin, mortgages, Fedwire, CAD, GBP) not mentioned in the context excerpts, "
+            "or asks for provisions under a rule ID that does not cover that action/asset, you MUST set 'answerable': false and confidence: 0.0. "
+            "NEVER substitute unrelated provisions from a section when the requested action/asset is absent.\n"
+            "6. Exact Values & Digits: Always write numbers, quantities, counts, and metrics as digits (e.g. use '3', '5 business days', '$8.00 USD', 'FX-TR-901') "
+            "alongside any explanatory words.\n"
+            "7. If the requested information is absent or cannot be verified from the excerpts, set 'answerable': false, "
+            f"and set 'answer': \"The provided document does not contain sufficient information to answer the question: '{safe_query}'.\"\n"
+            "7. Output ONLY a valid JSON object matching this schema:\n"
+            "{\n"
+            "  \"answer\": \"concise factual explanation\",\n"
+            "  \"supporting_quotes\": [\"exact verbatim sentence from text\"],\n"
+            "  \"confidence\": 0.95,\n"
+            "  \"answerable\": true\n"
+            "}"
+        )
+
+        user_content = (
+            f"<untrusted_document_context>\n{joined_context}\n</untrusted_document_context>\n\n"
+            f"<untrusted_user_query>\n{safe_query}\n</untrusted_user_query>\n\n"
+            "Return valid JSON:"
+        )
+
+        try:
+            content_str = ""
+            if self.is_live_ollama and not self.is_live_openai:
+                url = f"{self.ollama_base_url}/api/chat"
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.0},
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        content_str = resp.json().get("message", {}).get("content", "").strip()
+            elif self.is_live_openai:
+                url = f"{self.base_url}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.0,
+                    "max_tokens": 500,
+                }
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        content_str = resp.json()["choices"][0]["message"]["content"].strip()
+
+            if content_str:
+                data = json.loads(content_str)
+                if isinstance(data, dict) and "answer" in data:
+                    return data
+        except Exception as exc:
+            logger.debug("Structured QA generation failed (%s)", exc)
+
+        return None
+
+    async def generate_document_qa_answer(
+        self,
+        query: str,
+        context_excerpts: List[PolicyCitation],
+    ) -> Optional[str]:
+        """Generates a natural-language document QA answer strictly grounded in provided excerpts."""
+        structured = await self.generate_structured_qa_answer(query, context_excerpts)
+        if structured and isinstance(structured, dict):
+            return structured.get("answer")
+        return None

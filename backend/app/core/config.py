@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     EMBEDDING_TIMEOUT_SECONDS: float = 60.0
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
     OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
-    OLLAMA_LLM_MODEL: str = "llama3.2:1b"
+    OLLAMA_LLM_MODEL: str = "llama3.1:8b"
     LLM_PROVIDER: str = "mock"
     RAG_TOP_K: int = 5
     RETRIEVAL_HYBRID_RRF_K: int = 60

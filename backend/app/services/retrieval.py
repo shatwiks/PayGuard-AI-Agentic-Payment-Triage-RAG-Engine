@@ -85,12 +85,14 @@ class HybridRetrievalService:
         rrf_k: Optional[int] = None,
         lexical_weight: Optional[float] = None,
         semantic_weight: Optional[float] = None,
+        llm_service: Optional[Any] = None,
     ):
         self.session = session
         self.provider = embedding_provider or get_embedding_provider()
         self.rrf_k = rrf_k or settings.RETRIEVAL_HYBRID_RRF_K
         self.lexical_weight = lexical_weight or settings.RETRIEVAL_LEXICAL_WEIGHT
         self.semantic_weight = semantic_weight or settings.RETRIEVAL_SEMANTIC_WEIGHT
+        self.llm = llm_service
 
     def _is_postgresql(self) -> bool:
         """Determines if the active session is connected to a PostgreSQL database."""
@@ -477,31 +479,55 @@ class HybridRetrievalService:
         requested_mode = req_obj.retrieval_mode
         candidate_map: Dict[uuid.UUID, Dict] = {}
 
-        # 1. Lexical retrieval
+        # Query normalization
+        normalized_query = " ".join(req_obj.query.strip().split())
+        queries_to_search = [normalized_query]
+
+        # Multi-query expansion / paraphrasing to bridge vocabulary gaps generically
+        if self.llm and getattr(self.llm, "is_live_provider", False):
+            try:
+                paraphrases = await self.llm.generate_query_paraphrases(normalized_query, count=2)
+                for p in paraphrases:
+                    p_clean = " ".join(p.strip().split())
+                    if p_clean and p_clean.lower() != normalized_query.lower() and p_clean not in queries_to_search:
+                        queries_to_search.append(p_clean)
+            except Exception as e:
+                logger.debug("Query expansion skipped: %s", e)
+
+        # 1. Lexical retrieval across primary and expanded queries
         lexical_items = []
         if requested_mode in ("hybrid", "lexical", "lexical_only"):
-            lexical_items = await self.lexical_search(
-                query=req_obj.query,
-                top_k=req_obj.top_k * 3,
-                doc_type=req_obj.doc_type,
-                scheme=req_obj.scheme,
-                condition_code=req_obj.condition_code,
-                document_ids=eff_doc_ids,
-                user_id=user_id,
-                scope=eff_scope,
-                user_role=user_role,
-            )
-            for chunk, rank, score in lexical_items:
-                candidate_map[chunk.id] = {
-                    "chunk": chunk,
-                    "lexical_rank": rank,
-                    "lexical_score": score,
-                    "semantic_rank": None,
-                    "semantic_distance": None,
-                    "semantic_similarity": None,
-                }
+            for q_idx, q_text in enumerate(queries_to_search):
+                q_lexical = await self.lexical_search(
+                    query=q_text,
+                    top_k=req_obj.top_k * 3,
+                    doc_type=req_obj.doc_type,
+                    scheme=req_obj.scheme,
+                    condition_code=req_obj.condition_code,
+                    document_ids=eff_doc_ids,
+                    user_id=user_id,
+                    scope=eff_scope,
+                    user_role=user_role,
+                )
+                if q_idx == 0:
+                    lexical_items = q_lexical
+                for chunk, rank, score in q_lexical:
+                    # Scale rank slightly for expansion queries to preserve primary query primacy
+                    effective_rank = rank if q_idx == 0 else rank + 2
+                    if chunk.id not in candidate_map:
+                        candidate_map[chunk.id] = {
+                            "chunk": chunk,
+                            "lexical_rank": effective_rank,
+                            "lexical_score": score,
+                            "semantic_rank": None,
+                            "semantic_distance": None,
+                            "semantic_similarity": None,
+                        }
+                    elif candidate_map[chunk.id]["lexical_rank"] is None or effective_rank < candidate_map[chunk.id]["lexical_rank"]:
+                        candidate_map[chunk.id]["lexical_rank"] = effective_rank
+                        candidate_map[chunk.id]["lexical_score"] = max(score, candidate_map[chunk.id]["lexical_score"] or 0.0)
 
-        # 2. Semantic retrieval
+        # 2. Semantic retrieval across primary and expanded queries
         semantic_items = []
         semantic_available = self.provider.is_available
 
@@ -512,31 +538,36 @@ class HybridRetrievalService:
 
         if requested_mode in ("hybrid", "semantic_only") and semantic_available:
             try:
-                semantic_items = await self.semantic_search(
-                    query=req_obj.query,
-                    top_k=req_obj.top_k * 3,
-                    doc_type=req_obj.doc_type,
-                    scheme=req_obj.scheme,
-                    condition_code=req_obj.condition_code,
-                    document_ids=eff_doc_ids,
-                    user_id=user_id,
-                    scope=eff_scope,
-                    user_role=user_role,
-                )
-                for chunk, rank, dist, sim in semantic_items:
-                    if chunk.id in candidate_map:
-                        candidate_map[chunk.id]["semantic_rank"] = rank
-                        candidate_map[chunk.id]["semantic_distance"] = dist
-                        candidate_map[chunk.id]["semantic_similarity"] = sim
-                    else:
-                        candidate_map[chunk.id] = {
-                            "chunk": chunk,
-                            "lexical_rank": None,
-                            "lexical_score": None,
-                            "semantic_rank": rank,
-                            "semantic_distance": dist,
-                            "semantic_similarity": sim,
-                        }
+                for q_idx, q_text in enumerate(queries_to_search):
+                    q_semantic = await self.semantic_search(
+                        query=q_text,
+                        top_k=req_obj.top_k * 3,
+                        doc_type=req_obj.doc_type,
+                        scheme=req_obj.scheme,
+                        condition_code=req_obj.condition_code,
+                        document_ids=eff_doc_ids,
+                        user_id=user_id,
+                        scope=eff_scope,
+                        user_role=user_role,
+                    )
+                    if q_idx == 0:
+                        semantic_items = q_semantic
+                    for chunk, rank, dist, sim in q_semantic:
+                        effective_rank = rank if q_idx == 0 else rank + 2
+                        if chunk.id in candidate_map:
+                            if candidate_map[chunk.id]["semantic_rank"] is None or effective_rank < candidate_map[chunk.id]["semantic_rank"]:
+                                candidate_map[chunk.id]["semantic_rank"] = effective_rank
+                                candidate_map[chunk.id]["semantic_distance"] = dist
+                                candidate_map[chunk.id]["semantic_similarity"] = sim
+                        else:
+                            candidate_map[chunk.id] = {
+                                "chunk": chunk,
+                                "lexical_rank": None,
+                                "lexical_score": None,
+                                "semantic_rank": effective_rank,
+                                "semantic_distance": dist,
+                                "semantic_similarity": sim,
+                            }
             except Exception as e:
                 logger.warning(f"Semantic search encountered an error: {e}")
                 if requested_mode == "semantic_only":

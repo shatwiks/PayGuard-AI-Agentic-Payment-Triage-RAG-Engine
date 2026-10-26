@@ -42,7 +42,7 @@ services:
       OLLAMA_BASE_URL: ${STAGING_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2:1b}
-      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RATE_LIMIT_ENABLED: "true"
       MASK_PII_ENABLED: "true"
