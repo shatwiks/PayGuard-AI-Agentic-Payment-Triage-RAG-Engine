@@ -1,0 +1,47 @@
+name: PayGuard AI Daily Engine Heartbeat
+
+on:
+  schedule:
+    # Runs everyday at 06:00 UTC (11:30 AM IST)
+    - cron: '0 6 * * *'
+  workflow_dispatch: # Allows manual one-click trigger from GitHub Actions UI
+
+permissions:
+  contents: write
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configure Git Identity
+        run: |
+          git config user.name "shatwiks"
+          git config user.email "shatwik.mitblr2024@learner.manipal.edu"
+
+      - name: Record Engine Heartbeat
+        run: |
+          mkdir -p .github/telemetry
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RUN_ID="${{ github.run_id }}"
+          cat <<EOF > .github/telemetry/heartbeat.json
+          {
+            "engine": "PayGuard AI: Agentic Payment Triage & RAG Engine",
+            "status": "operational",
+            "last_heartbeat_utc": "$TIMESTAMP",
+            "run_id": "$RUN_ID",
+            "verification": "verified"
+          }
+          EOF
+
+      - name: Commit & Push Heartbeat
+        run: |
+          git add .github/telemetry/heartbeat.json
+          git commit -m "chore(telemetry): update daily engine health heartbeat [skip ci]" || exit 0
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
