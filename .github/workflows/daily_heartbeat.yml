@@ -1,9 +1,9 @@
-name: PayGuard AI Daily Engine Heartbeat
+name: PayGuard AI Engine Telemetry Heartbeat
 
 on:
   schedule:
-    # Runs everyday at 06:00 UTC (11:30 AM IST)
-    - cron: '0 6 * * *'
+    # Runs every 8 hours: 00:00, 08:00, 16:00 UTC (05:30 AM, 01:30 PM, 09:30 PM IST)
+    - cron: '0 */8 * * *'
   workflow_dispatch: # Allows manual one-click trigger from GitHub Actions UI
 
 permissions:
