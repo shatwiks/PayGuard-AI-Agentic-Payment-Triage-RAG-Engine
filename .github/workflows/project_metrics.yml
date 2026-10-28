@@ -1,0 +1,48 @@
+name: Refresh Project Metrics
+
+on:
+  schedule:
+    # Every 8 hours: 00:00, 08:00, 16:00 UTC (05:30 AM, 01:30 PM, 09:30 PM IST)
+    - cron: '0 */8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Regenerate project metrics
+        run: python scripts/update_project_metrics.py
+
+      - name: Commit updated metrics
+        run: |
+          git config user.name "shatwiks"
+          git config user.email "shatwik.mitblr2024@learner.manipal.edu"
+          git add docs/PROJECT_METRICS.md
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          MESSAGES=(
+            "docs: refresh project metrics"
+            "docs(metrics): update codebase statistics"
+            "docs: update test and API surface summary"
+            "docs(metrics): sync language breakdown and line counts"
+            "docs: regenerate project metrics report"
+            "docs(metrics): refresh test case and route counts"
+          )
+          INDEX=$(( $(date +%s) / 28800 % ${#MESSAGES[@]} ))
+          git commit -m "${MESSAGES[$INDEX]} [skip ci]"
+          git push origin main
