@@ -10,12 +10,13 @@ from backend.app.core.errors import register_error_handlers
 
 def create_application() -> FastAPI:
     """FastAPI application factory."""
+    docs_enabled = (settings.APP_ENV or "").lower() != "production" or settings.DEBUG
     app = FastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
-        openapi_url=f"{settings.API_V1_STR}/openapi.json",
-        docs_url=f"{settings.API_V1_STR}/docs",
-        redoc_url=f"{settings.API_V1_STR}/redoc",
+        openapi_url=f"{settings.API_V1_STR}/openapi.json" if docs_enabled else None,
+        docs_url=f"{settings.API_V1_STR}/docs" if docs_enabled else None,
+        redoc_url=f"{settings.API_V1_STR}/redoc" if docs_enabled else None,
         description=(
             "PayGuard AI is an AI-powered payment investigation backend that helps payment operations "
             "and support engineers investigate transaction issues using deterministic triage, "
@@ -51,7 +52,7 @@ def create_application() -> FastAPI:
             allow_origins=origins,
             allow_credentials=allow_cred,
             allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            allow_headers=["*"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key", "Accept"],
             expose_headers=["X-Request-ID"],
         )
 

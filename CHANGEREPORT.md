@@ -1,5 +1,19 @@
 # Change Report (`CHANGEREPORT.md`)
 
+## 2026-11-22 07:10 IST — Pre-LinkedIn Production Security Hardening
+
+### Objective
+Harden public repository, API middleware, authentication, CORS, error handling, and CI workflow permissions prior to public LinkedIn sharing.
+
+### Files Modified & Created
+- `backend/app/main.py` — Disabled OpenAPI/Swagger/ReDoc endpoints automatically when `APP_ENV=production` and `DEBUG=False`, and narrowed CORS `allow_headers` from `*` to an explicit header allowlist.
+- `SECURITY.md` — Added responsible vulnerability disclosure policy.
+
+### Verification Results
+- `python -m py_compile backend/app/main.py` (PASS).
+
+---
+
 ## 2026-11-21 02:58 IST — Upgrade `README.md` with Verified Architecture, Quickstart & Audit Reports
 
 ### Objective
